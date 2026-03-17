@@ -21,12 +21,7 @@ const startupErrors = [];
 // MIDDLEWARE
 // ============================================================
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://127.0.0.1:5173'
-  ],
+  origin: true,  // Allow all origins — lock this down after testing
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -66,7 +61,6 @@ async function loadRoute(importPath, mountPath, label) {
       error: err.message,
       stack: err.stack
     });
-    // Keep endpoint alive with a helpful 503
     app.use(mountPath, (_req, res) =>
       res.status(503).json({
         success: false,
@@ -80,10 +74,6 @@ async function loadRoute(importPath, mountPath, label) {
 
 // ============================================================
 // ROUTES
-// ⚠️  ORDER MATTERS:
-//    employeeRoutes contains /export/template and /export/data
-//    declared BEFORE /:id inside the router — so no separate
-//    export router is needed.
 // ============================================================
 await loadRoute('./routes/employeeMng/authRoutes.js',             '/api/auth',               'authRoutes');
 await loadRoute('./routes/employeeMng/employeeRoutes.js',         '/api/employees',          'employeeRoutes');
@@ -260,22 +250,23 @@ pool.query('SELECT NOW() as t', (err, result) => {
 pool.on('error', err => console.error('❌ DB pool error:', err.message));
 
 // ============================================================
-// START SERVER
+// START SERVER — 0.0.0.0 allows connections from other machines
 // ============================================================
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('='.repeat(60));
   console.log('🚀 Employee Management System API');
   console.log('='.repeat(60));
   console.log(`✅ Server:        http://localhost:${PORT}`);
-  console.log(`🔍 Debug:         http://localhost:${PORT}/api/debug`);
-  console.log(`🏥 Health:        http://localhost:${PORT}/api/health`);
+  console.log(`🌐 Network:       http://192.168.1.37:${PORT}`);
+  console.log(`🔍 Debug:         http://192.168.1.37:${PORT}/api/debug`);
+  console.log(`🏥 Health:        http://192.168.1.37:${PORT}/api/health`);
   console.log(`🔗 Generate link: POST /api/registration-links`);
   console.log(`📋 Submit form:   POST /api/registrations`);
   console.log(`⏳ Pending:       GET  /api/registrations/pending`);
   console.log(`👥 Employees:     GET  /api/employees`);
   console.log(`📤 Export data:   GET  /api/employees/export/data`);
   console.log(`📄 Template:      GET  /api/employees/export/template`);
-  console.log(`📂 Uploads:       http://localhost:${PORT}/uploads`);
+  console.log(`📂 Uploads:       http://192.168.1.37:${PORT}/uploads`);
   if (startupErrors.length > 0) {
     console.log('');
     console.log('⚠️  STARTUP PROBLEMS — open /api/debug for details:');

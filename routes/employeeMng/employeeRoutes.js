@@ -149,7 +149,6 @@ router.get('/export/template', async (req, res) => {
     const worksheet = workbook.addWorksheet('Employee Import');
     worksheet.views = [{ state: 'frozen', ySplit: 2 }];
 
-    // Row 1 — section group labels (merged cells)
     const sections = [
       { label: 'Personal Information', start: 1,  end: 13, color: 'FF1D4ED8' },
       { label: 'Employment Details',   start: 14, end: 20, color: 'FF7C3AED' },
@@ -165,39 +164,35 @@ router.get('/export/template', async (req, res) => {
     });
     worksheet.getRow(1).height = 22;
 
-    // Row 2 — column headers (* = required)
     const columns = [
-      // Personal Info
-      { header: 'First Name *',         key: 'first_name',          width: 16, req: true  },
-      { header: 'Middle Name',          key: 'middle_name',         width: 16, req: false },
-      { header: 'Last Name *',          key: 'last_name',           width: 16, req: true  },
-      { header: 'Email *',              key: 'email',               width: 28, req: true  },
-      { header: 'Phone *',              key: 'phone',               width: 14, req: true  },
-      { header: 'Alternate Phone',      key: 'alt_phone',           width: 14, req: false },
-      { header: 'Date of Birth *',      key: 'dob',                 width: 14, req: true  },
-      { header: 'Gender *',             key: 'gender',              width: 10, req: true  },
-      { header: 'Aadhar Number *',      key: 'aadhar_number',       width: 16, req: true  },
-      { header: 'Address',              key: 'address',             width: 24, req: false },
-      { header: 'City',                 key: 'city',                width: 14, req: false },
-      { header: 'State',                key: 'state',               width: 14, req: false },
-      { header: 'Zip Code',             key: 'zip_code',            width: 12, req: false },
-      // Employment
-      { header: 'Department *',         key: 'department',          width: 18, req: true  },
-      { header: 'Designation *',        key: 'designation',         width: 20, req: true  },
-      { header: 'Joining Date *',       key: 'joining_date',        width: 14, req: true  },
-      { header: 'Employment Type *',    key: 'employment_type',     width: 16, req: true  },
-      { header: 'Circle',               key: 'circle',              width: 12, req: false },
-      { header: 'Project Name',         key: 'project_name',        width: 18, req: false },
-      { header: 'Reporting Manager',    key: 'reporting_manager',   width: 20, req: false },
-      // Salary & Bank
-      { header: 'Basic Salary',         key: 'basic_salary',        width: 14, req: false },
-      { header: 'HRA',                  key: 'hra',                 width: 12, req: false },
-      { header: 'Other Allowances',     key: 'other_allowances',    width: 18, req: false },
-      { header: 'Bank Name *',          key: 'bank_name',           width: 22, req: true  },
-      { header: 'Bank Branch',          key: 'bank_branch',         width: 18, req: false },
-      { header: 'Account Number *',     key: 'account_number',      width: 18, req: true  },
-      { header: 'IFSC Code *',          key: 'ifsc_code',           width: 14, req: true  },
-      { header: 'Account Holder Name',  key: 'account_holder_name', width: 22, req: false },
+      { header: 'First Name *',        key: 'first_name',          width: 16, req: true  },
+      { header: 'Middle Name',         key: 'middle_name',         width: 16, req: false },
+      { header: 'Last Name *',         key: 'last_name',           width: 16, req: true  },
+      { header: 'Email *',             key: 'email',               width: 28, req: true  },
+      { header: 'Phone *',             key: 'phone',               width: 14, req: true  },
+      { header: 'Alternate Phone',     key: 'alt_phone',           width: 14, req: false },
+      { header: 'Date of Birth *',     key: 'dob',                 width: 14, req: true  },
+      { header: 'Gender *',            key: 'gender',              width: 10, req: true  },
+      { header: 'Aadhar Number *',     key: 'aadhar_number',       width: 16, req: true  },
+      { header: 'Address',             key: 'address',             width: 24, req: false },
+      { header: 'City',                key: 'city',                width: 14, req: false },
+      { header: 'State',               key: 'state',               width: 14, req: false },
+      { header: 'Zip Code',            key: 'zip_code',            width: 12, req: false },
+      { header: 'Department *',        key: 'department',          width: 18, req: true  },
+      { header: 'Designation *',       key: 'designation',         width: 20, req: true  },
+      { header: 'Joining Date *',      key: 'joining_date',        width: 14, req: true  },
+      { header: 'Employment Type *',   key: 'employment_type',     width: 16, req: true  },
+      { header: 'Circle',              key: 'circle',              width: 12, req: false },
+      { header: 'Project Name',        key: 'project_name',        width: 18, req: false },
+      { header: 'Reporting Manager',   key: 'reporting_manager',   width: 20, req: false },
+      { header: 'Basic Salary',        key: 'basic_salary',        width: 14, req: false },
+      { header: 'HRA',                 key: 'hra',                 width: 12, req: false },
+      { header: 'Other Allowances',    key: 'other_allowances',    width: 18, req: false },
+      { header: 'Bank Name *',         key: 'bank_name',           width: 22, req: true  },
+      { header: 'Bank Branch',         key: 'bank_branch',         width: 18, req: false },
+      { header: 'Account Number *',    key: 'account_number',      width: 18, req: true  },
+      { header: 'IFSC Code *',         key: 'ifsc_code',           width: 14, req: true  },
+      { header: 'Account Holder Name', key: 'account_holder_name', width: 22, req: false },
     ];
 
     columns.forEach((col, idx) => {
@@ -211,7 +206,6 @@ router.get('/export/template', async (req, res) => {
     });
     worksheet.getRow(2).height = 22;
 
-    // Row 3 — sample data
     const sampleRow = worksheet.getRow(3);
     const sampleValues = [
       'Rahul', 'Suresh', 'Sharma', 'rahul.sharma@example.com', '9876543210', '9988776655',
@@ -231,7 +225,6 @@ router.get('/export/template', async (req, res) => {
     });
     sampleRow.height = 18;
 
-    // Rows 4–12 — blank with alternating background
     for (let r = 4; r <= 12; r++) {
       const row = worksheet.getRow(r);
       const bg  = r % 2 === 0 ? 'FFFAFAFA' : 'FFFFFFFF';
@@ -255,45 +248,33 @@ router.get('/export/template', async (req, res) => {
 });
 
 // ── GET /api/employees/export/data ────────────────────────────────────────
-// Export format matches the import template exactly:
-//   Row 1 — section group labels (merged, color-coded)
-//   Row 2 — column headers (green = required, teal = optional)
-//   Row 3+ — employee data rows (alternating bg)
-// This means the exported file can be re-imported directly.
 router.get('/export/data', async (req, res) => {
   try {
     const { default: ExcelJS } = await import('exceljs');
 
     const { rows } = await pool.query(`
       SELECT
-        e.employee_id,
-        e.first_name,
-        e.middle_name,
-        e.last_name,
-        e.email,
-        e.phone,
-        COALESCE(e.alt_phone, '')       AS alt_phone,
-        e.date_of_birth,
-        e.gender,
-        COALESCE(e.aadhar_number, '')   AS aadhar_number,
-        COALESCE(e.address, '')         AS address,
-        COALESCE(e.city, '')            AS city,
-        COALESCE(e.state, '')           AS state,
-        COALESCE(e.zip_code, '')        AS zip_code,
+        e.employee_id, e.first_name, e.middle_name, e.last_name,
+        e.email, e.phone,
+        COALESCE(e.alt_phone, '')        AS alt_phone,
+        e.date_of_birth, e.gender,
+        COALESCE(e.aadhar_number, '')    AS aadhar_number,
+        COALESCE(e.address, '')          AS address,
+        COALESCE(e.city, '')             AS city,
+        COALESCE(e.state, '')            AS state,
+        COALESCE(e.zip_code, '')         AS zip_code,
         e.department,
-        e.position                      AS designation,
-        e.joining_date,
-        e.employment_type,
-        COALESCE(e.circle, '')          AS circle,
-        COALESCE(e.project_name, '')    AS project_name,
-        COALESCE(e.reporting_manager,'')AS reporting_manager,
-        COALESCE(e.basic_salary, 0)     AS basic_salary,
-        COALESCE(e.hra, 0)              AS hra,
-        COALESCE(e.other_allowances, 0) AS other_allowances,
+        e.position                       AS designation,
+        e.joining_date, e.employment_type,
+        COALESCE(e.circle, '')           AS circle,
+        COALESCE(e.project_name, '')     AS project_name,
+        COALESCE(e.reporting_manager,'') AS reporting_manager,
+        COALESCE(e.basic_salary, 0)      AS basic_salary,
+        COALESCE(e.hra, 0)               AS hra,
+        COALESCE(e.other_allowances, 0)  AS other_allowances,
         e.bank_name,
-        COALESCE(e.bank_branch, '')     AS bank_branch,
-        e.account_number,
-        e.ifsc_code,
+        COALESCE(e.bank_branch, '')      AS bank_branch,
+        e.account_number, e.ifsc_code,
         COALESCE(e.account_holder_name,'') AS account_holder_name,
         e.status
       FROM employees e
@@ -309,15 +290,11 @@ router.get('/export/data', async (req, res) => {
     workbook.creator = 'Employee Management System';
     workbook.created = new Date();
 
-    // ── Same sheet name as import template ──
     const ws = workbook.addWorksheet('Employee Import', {
-      views: [{ state: 'frozen', ySplit: 2 }],  // freeze both header rows
+      views: [{ state: 'frozen', ySplit: 2 }],
     });
 
-    // ── Column definitions — exact match to import template ──
-    // (header, key, required, width)
     const COLUMNS = [
-      // Personal Information (cols 1–13)
       { header: 'First Name *',        key: 'first_name',          req: true,  width: 16 },
       { header: 'Middle Name',         key: 'middle_name',         req: false, width: 16 },
       { header: 'Last Name *',         key: 'last_name',           req: true,  width: 16 },
@@ -331,7 +308,6 @@ router.get('/export/data', async (req, res) => {
       { header: 'City',                key: 'city',                req: false, width: 14 },
       { header: 'State',               key: 'state',               req: false, width: 14 },
       { header: 'Zip Code',            key: 'zip_code',            req: false, width: 12 },
-      // Employment Details (cols 14–20)
       { header: 'Department *',        key: 'department',          req: true,  width: 18 },
       { header: 'Designation *',       key: 'designation',         req: true,  width: 20 },
       { header: 'Joining Date *',      key: 'joining_date',        req: true,  width: 14 },
@@ -339,7 +315,6 @@ router.get('/export/data', async (req, res) => {
       { header: 'Circle',              key: 'circle',              req: false, width: 12 },
       { header: 'Project Name',        key: 'project_name',        req: false, width: 18 },
       { header: 'Reporting Manager',   key: 'reporting_manager',   req: false, width: 20 },
-      // Salary & Bank (cols 21–28)
       { header: 'Basic Salary',        key: 'basic_salary',        req: false, width: 14 },
       { header: 'HRA',                 key: 'hra',                 req: false, width: 12 },
       { header: 'Other Allowances',    key: 'other_allowances',    req: false, width: 18 },
@@ -350,12 +325,10 @@ router.get('/export/data', async (req, res) => {
       { header: 'Account Holder Name', key: 'account_holder_name', req: false, width: 22 },
     ];
 
-    // Set column widths
     COLUMNS.forEach((col, idx) => {
       ws.getColumn(idx + 1).width = col.width;
     });
 
-    // ── ROW 1: Section group labels — exact same as template ──
     const SECTIONS = [
       { label: 'Personal Information', start: 1,  end: 13, color: 'FF1D4ED8' },
       { label: 'Employment Details',   start: 14, end: 20, color: 'FF7C3AED' },
@@ -372,7 +345,6 @@ router.get('/export/data', async (req, res) => {
     });
     ws.getRow(1).height = 22;
 
-    // ── ROW 2: Column headers — green (required) / teal (optional) ──
     COLUMNS.forEach((col, idx) => {
       const cell = ws.getCell(2, idx + 1);
       cell.value     = col.header;
@@ -383,7 +355,6 @@ router.get('/export/data', async (req, res) => {
     });
     ws.getRow(2).height = 22;
 
-    // ── ROWS 3+: Employee data rows (alternating bg, same as template blank rows) ──
     const hairBorder = {
       top:    { style: 'hair', color: { argb: 'FFE5E7EB' } },
       bottom: { style: 'hair', color: { argb: 'FFE5E7EB' } },
@@ -392,40 +363,21 @@ router.get('/export/data', async (req, res) => {
     };
 
     rows.forEach((emp, idx) => {
-      const rowNum = idx + 3;   // data starts at row 3
-      const bg     = idx % 2 === 0 ? 'FFF0FDF4' : 'FFFFFFFF'; // same light green / white as template
-
+      const rowNum = idx + 3;
+      const bg     = idx % 2 === 0 ? 'FFF0FDF4' : 'FFFFFFFF';
       const values = [
-        emp.first_name          || '',
-        emp.middle_name         || '',
-        emp.last_name           || '',
-        emp.email               || '',
-        emp.phone               || '',
-        emp.alt_phone           || '',
+        emp.first_name || '', emp.middle_name || '', emp.last_name || '',
+        emp.email || '', emp.phone || '', emp.alt_phone || '',
         emp.date_of_birth ? new Date(emp.date_of_birth).toLocaleDateString('en-IN') : '',
-        emp.gender              || '',
-        emp.aadhar_number       || '',
-        emp.address             || '',
-        emp.city                || '',
-        emp.state               || '',
-        emp.zip_code            || '',
-        emp.department          || '',
-        emp.designation         || '',
+        emp.gender || '', emp.aadhar_number || '',
+        emp.address || '', emp.city || '', emp.state || '', emp.zip_code || '',
+        emp.department || '', emp.designation || '',
         emp.joining_date ? new Date(emp.joining_date).toLocaleDateString('en-IN') : '',
-        emp.employment_type     || '',
-        emp.circle              || '',
-        emp.project_name        || '',
-        emp.reporting_manager   || '',
-        Number(emp.basic_salary)     || 0,
-        Number(emp.hra)              || 0,
-        Number(emp.other_allowances) || 0,
-        emp.bank_name           || '',
-        emp.bank_branch         || '',
-        emp.account_number      || '',
-        emp.ifsc_code           || '',
-        emp.account_holder_name || '',
+        emp.employment_type || '', emp.circle || '', emp.project_name || '', emp.reporting_manager || '',
+        Number(emp.basic_salary) || 0, Number(emp.hra) || 0, Number(emp.other_allowances) || 0,
+        emp.bank_name || '', emp.bank_branch || '', emp.account_number || '',
+        emp.ifsc_code || '', emp.account_holder_name || '',
       ];
-
       values.forEach((val, colIdx) => {
         const cell = ws.getCell(rowNum, colIdx + 1);
         cell.value     = val;
@@ -434,22 +386,17 @@ router.get('/export/data', async (req, res) => {
         cell.border    = hairBorder;
         cell.font      = { size: 10 };
       });
-
-      // Salary cells — currency format + green font
       [21, 22, 23].forEach(colIdx => {
         const cell = ws.getCell(rowNum, colIdx);
         cell.numFmt = '₹#,##0.00';
         cell.font   = { size: 10, color: { argb: 'FF065F46' } };
       });
-
       ws.getRow(rowNum).height = 18;
     });
 
-    // ── Summary row at bottom ──
     const summaryRowNum = rows.length + 3;
-    const summaryCell   = ws.getCell(summaryRowNum, 1);
-    summaryCell.value   = `Total Employees: ${rows.length}`;
-    summaryCell.font    = { bold: true, color: { argb: 'FF4F46E5' }, size: 10 };
+    ws.getCell(summaryRowNum, 1).value = `Total Employees: ${rows.length}`;
+    ws.getCell(summaryRowNum, 1).font  = { bold: true, color: { argb: 'FF4F46E5' }, size: 10 };
     ws.getRow(summaryRowNum).height = 18;
 
     const date = new Date().toISOString().slice(0, 10);
@@ -457,7 +404,6 @@ router.get('/export/data', async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="employees_export_${date}.xlsx"`);
     await workbook.xlsx.write(res);
     res.end();
-
     console.log(`✅ Exported ${rows.length} employees`);
 
   } catch (err) {
@@ -500,7 +446,6 @@ router.post('/', async (req, res) => {
     await client.query('BEGIN');
     const b = req.body;
 
-    // Validate required fields
     const missing = [];
     if (!b.firstName?.trim())     missing.push('First Name');
     if (!b.lastName?.trim())      missing.push('Last Name');
@@ -524,7 +469,6 @@ router.post('/', async (req, res) => {
 
     const employeeId = b.employeeId?.trim() || await generateEmployeeId(client);
 
-    // ✅ NOW INCLUDES: basic_salary, hra, other_allowances, aadhar_number, alt_phone
     const { rows } = await client.query(`
       INSERT INTO employees (
         employee_id, first_name, middle_name, last_name,
@@ -535,43 +479,26 @@ router.post('/', async (req, res) => {
         joining_date, reporting_manager, employment_type, status,
         basic_salary, hra, other_allowances
       ) VALUES (
-        $1,$2,$3,$4,
-        $5,$6,$7,$8,$9,$10,
-        $11,$12,$13,$14,
-        $15,$16,$17,$18,$19,
-        $20,$21,$22,$23,
-        $24,$25,$26,$27,
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+        $11,$12,$13,$14,$15,$16,$17,$18,$19,
+        $20,$21,$22,$23,$24,$25,$26,$27,
         $28,$29,$30
       ) RETURNING *
     `, [
       employeeId,
-      b.firstName.trim(),
-      b.middleName?.trim()     || null,
-      b.lastName.trim(),
-      b.email.trim().toLowerCase(),
-      b.phone.trim(),
-      b.altPhone?.trim()       || null,           // alt_phone
-      b.dob,
-      b.gender,
-      b.aadhar?.replace(/\s/g, '') || null,       // aadhar_number
-      b.address                || '',
-      b.city                   || '',
-      b.state                  || '',
-      b.zipCode                || '',
-      b.bankName.trim(),
-      b.accountNumber.trim(),
-      b.ifscCode.trim().toUpperCase(),
+      b.firstName.trim(), b.middleName?.trim() || null, b.lastName.trim(),
+      b.email.trim().toLowerCase(), b.phone.trim(),
+      b.altPhone?.trim() || null,
+      b.dob, b.gender,
+      b.aadhar?.replace(/\s/g, '') || null,
+      b.address || '', b.city || '', b.state || '', b.zipCode || '',
+      b.bankName.trim(), b.accountNumber.trim(), b.ifscCode.trim().toUpperCase(),
       b.accountHolderName?.trim() || `${b.firstName.trim()} ${b.lastName.trim()}`,
-      b.branch?.trim()         || b.bankBranch?.trim() || null,
-      b.designation.trim(),
-      b.department,
-      b.circle                 || null,
-      b.projectName            || null,
-      b.joiningDate,
-      b.reportingManager       || null,
-      b.employmentType,
-      b.status                 || 'Active',
-      // ✅ Salary fields — properly parsed as numbers
+      b.branch?.trim() || b.bankBranch?.trim() || null,
+      b.designation.trim(), b.department,
+      b.circle || null, b.projectName || null,
+      b.joiningDate, b.reportingManager || null, b.employmentType,
+      b.status || 'Active',
       parseFloat(b.basicSalary)     || 0,
       parseFloat(b.hra)             || 0,
       parseFloat(b.otherAllowances) || 0,
@@ -607,42 +534,104 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ── PUT /api/employees/:id ─────────────────────────────────────────────────
+// ── PUT /api/employees/:id — UPDATED: all fields ──────────────────────────
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const b = req.body;
+    const b      = req.body;
+
     const { rows } = await pool.query(`
       UPDATE employees SET
-        first_name=$1, last_name=$2, email=$3, phone=$4,
-        department=$5, position=$6, joining_date=$7,
-        status=$8,
-        basic_salary=$9, hra=$10, other_allowances=$11,
-        updated_at=CURRENT_TIMESTAMP
-      WHERE id::text=$12 OR employee_id=$12
+        first_name          = $1,
+        middle_name         = $2,
+        last_name           = $3,
+        email               = $4,
+        phone               = $5,
+        alt_phone           = $6,
+        date_of_birth       = $7,
+        gender              = $8,
+        aadhar_number       = $9,
+        address             = $10,
+        city                = $11,
+        state               = $12,
+        zip_code            = $13,
+        department          = $14,
+        position            = $15,
+        employment_type     = $16,
+        joining_date        = $17,
+        circle              = $18,
+        project_name        = $19,
+        reporting_manager   = $20,
+        basic_salary        = $21,
+        hra                 = $22,
+        other_allowances    = $23,
+        bank_name           = $24,
+        account_number      = $25,
+        ifsc_code           = $26,
+        account_holder_name = $27,
+        bank_branch         = $28,
+        status              = $29,
+        updated_at          = CURRENT_TIMESTAMP
+      WHERE id::text = $30 OR employee_id = $30
       RETURNING *
     `, [
-      b.firstName, b.lastName, b.email, b.phone,
-      b.department, b.designation, b.joiningDate,
-      b.status,
-      parseFloat(b.basicSalary)     || 0,
-      parseFloat(b.hra)             || 0,
-      parseFloat(b.otherAllowances) || 0,
-      String(id)
+      b.firstName                       || null,  // $1
+      b.middleName                      || null,  // $2
+      b.lastName                        || null,  // $3
+      b.email                           || null,  // $4
+      b.phone                           || null,  // $5
+      b.altPhone                        || null,  // $6
+      b.dob                             || null,  // $7
+      b.gender                          || null,  // $8
+      b.aadhar                          || null,  // $9
+      b.address                         || '',    // $10
+      b.city                            || '',    // $11
+      b.state                           || '',    // $12
+      b.zipCode                         || '',    // $13
+      b.department                      || null,  // $14
+      b.designation                     || null,  // $15  (maps to position column)
+      b.employmentType                  || null,  // $16
+      b.joiningDate                     || null,  // $17
+      b.circle                          || null,  // $18
+      b.projectName                     || null,  // $19
+      b.reportingManager                || null,  // $20
+      parseFloat(b.basicSalary)         || 0,     // $21
+      parseFloat(b.hra)                 || 0,     // $22
+      parseFloat(b.otherAllowances)     || 0,     // $23
+      b.bankName                        || null,  // $24
+      b.accountNumber                   || null,  // $25
+      b.ifscCode                        || null,  // $26
+      b.accountHolderName               || null,  // $27
+      b.bankBranch                      || null,  // $28
+      b.status                          || 'Active', // $29
+      String(id),                                 // $30
     ]);
-    if (rows.length === 0) return res.status(404).json({ success: false, message: 'Employee not found' });
-    return res.json({ success: true, message: 'Employee updated', data: rows[0] });
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    // Return full employee with documents
+    const full = await pool.query(
+      `${EMP_SELECT} WHERE e.id = $1 GROUP BY e.id`,
+      [rows[0].id]
+    );
+
+    console.log(`✅ Employee updated: ${rows[0].employee_id}`);
+    return res.json({ success: true, message: 'Employee updated successfully', data: full.rows[0] });
+
   } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to update employee' });
+    console.error('[PUT /api/employees/:id]', err.message);
+    return res.status(500).json({ success: false, message: 'Failed to update employee', detail: err.message });
   }
 });
 
 // ── PATCH /api/employees/:id/status ───────────────────────────────────────
 router.patch('/:id/status', async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id }     = req.params;
     const { status } = req.body;
-    const allowed = ['Active', 'Inactive', 'Pending', 'active', 'inactive'];
+    const allowed    = ['Active', 'Inactive', 'Pending', 'active', 'inactive'];
     if (!allowed.includes(status)) {
       return res.status(400).json({ success: false, message: 'Invalid status value' });
     }

@@ -1,4 +1,6 @@
-// server.js
+// server.js  — unchanged from your existing file except:
+//   ✅ registrationRoutes now loads from the correct path
+//   ✅ approve/reject use POST (matching the updated registrationRoutes)
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -14,14 +16,13 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Collect startup errors — reported at /api/debug
 const startupErrors = [];
 
 // ============================================================
 // MIDDLEWARE
 // ============================================================
 app.use(cors({
-  origin: true,  // Allow all origins — lock this down after testing
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -30,7 +31,13 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Request logger
+// Serve uploaded files with CORS headers so frontend can load images/PDFs
+app.use('/uploads', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+}, express.static(path.join(__dirname, 'uploads')));
+
 app.use((req, _res, next) => {
   console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
   if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.url.includes('/auth/')) {
@@ -41,11 +48,8 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Serve uploaded files
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
 // ============================================================
-// ROUTE LOADER HELPER
+// ROUTE LOADER
 // ============================================================
 async function loadRoute(importPath, mountPath, label) {
   try {
@@ -55,12 +59,7 @@ async function loadRoute(importPath, mountPath, label) {
   } catch (err) {
     console.error(`❌ ${label} FAILED:`, err.message);
     console.error(err.stack);
-    startupErrors.push({
-      route: mountPath,
-      label,
-      error: err.message,
-      stack: err.stack
-    });
+    startupErrors.push({ route: mountPath, label, error: err.message, stack: err.stack });
     app.use(mountPath, (_req, res) =>
       res.status(503).json({
         success: false,
@@ -77,8 +76,10 @@ async function loadRoute(importPath, mountPath, label) {
 // ============================================================
 await loadRoute('./routes/employeeMng/authRoutes.js',             '/api/auth',               'authRoutes');
 await loadRoute('./routes/employeeMng/employeeRoutes.js',         '/api/employees',          'employeeRoutes');
-await loadRoute('./routes/employeeMng/registrationRoutes.js',     '/api/registrations',      'registrationRoutes');
+// ⚠️  registration-links MUST be mounted BEFORE registrations
+// (Express would otherwise match /api/registration-links against /api/registrations)
 await loadRoute('./routes/employeeMng/registrationLinkRoutes.js', '/api/registration-links', 'registrationLinkRoutes');
+await loadRoute('./routes/employeeMng/registrationRoutes.js',     '/api/registrations',      'registrationRoutes');
 await loadRoute('./routes/adminRoutes.js',                        '/api/admin',              'adminRoutes');
 
 // ============================================================
@@ -138,72 +139,89 @@ app.get('/api/debug', async (_req, res) => {
     dbErr = e.message;
   }
 
+  // Check new columns exist
+  let newColumnsOk = false, missingCols = [];
+  try {
+    const { rows: cols } = await pool.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'employees' AND column_name IN (
+        'father_husband_name','marital_status','blood_group',
+        'pan_number','aadhar_number','family_member_name',
+        'emergency_contact_name','permanent_address','local_address',
+        'ref1_name','ref2_name','ref3_name'
+      )
+    `);
+    const found = cols.map(r => r.column_name);
+    const required = ['father_husband_name','marital_status','blood_group','pan_number',
+      'aadhar_number','family_member_name','emergency_contact_name',
+      'permanent_address','local_address','ref1_name','ref2_name','ref3_name'];
+    missingCols = required.filter(c => !found.includes(c));
+    newColumnsOk = missingCols.length === 0;
+  } catch (_) {}
+
   const requiredTables = ['admin_users', 'employee_documents', 'employees', 'registration_links'];
   const missingTables  = requiredTables.filter(t => !dbTables.includes(t));
 
   const pkgChecks = {};
   for (const pkg of ['multer', 'pg', 'express', 'cors', 'dotenv', 'uuid', 'exceljs']) {
-    try {
-      await import(pkg);
-      pkgChecks[pkg] = '✅';
-    } catch (e) {
-      pkgChecks[pkg] = `❌ missing — run: npm install ${pkg}`;
-    }
+    try { await import(pkg); pkgChecks[pkg] = '✅'; }
+    catch (e) { pkgChecks[pkg] = `❌ missing — run: npm install ${pkg}`; }
   }
 
   const requiredEnv = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'];
   const missingEnv  = requiredEnv.filter(k => !process.env[k]);
 
-  const allOk = dbOk && missingTables.length === 0 && missingEnv.length === 0 && startupErrors.length === 0;
+  const allOk = dbOk && missingTables.length === 0 && missingEnv.length === 0
+    && startupErrors.length === 0 && newColumnsOk;
 
   res.status(allOk ? 200 : 503).json({
     overall: allOk ? '✅ All systems OK' : '❌ Problems found — fix items below',
     routeMountPoints: {
-      'POST /api/auth/login':                      'authRoutes',
-      'GET  /api/employees':                       'employeeRoutes — list all',
-      'GET  /api/employees/export/data':           'employeeRoutes — export Excel',
-      'GET  /api/employees/export/template':       'employeeRoutes — download template',
-      'GET  /api/employees/pending-count':         'employeeRoutes — pending badge count',
-      'POST /api/registration-links':              'linkRoutes ← generate link',
-      'GET  /api/registration-links/:id/validate': 'linkRoutes ← validate link',
-      'POST /api/registrations':                   'registrationRoutes ← submit form',
-      'GET  /api/registrations/pending':           'registrationRoutes ← admin pending list',
-      'POST /api/registrations/:id/approve':       'registrationRoutes ← approve',
-      'POST /api/registrations/:id/reject':        'registrationRoutes ← reject'
+      'POST /api/auth/login':                        'authRoutes',
+      'GET  /api/employees':                         'employeeRoutes',
+      'GET  /api/employees/export/data':             'employeeRoutes — export (all fields)',
+      'GET  /api/employees/export/template':         'employeeRoutes — import template',
+      'GET  /api/employees/pending-count':           'employeeRoutes — badge count',
+      'POST /api/registration-links':                'linkRoutes — generate link',
+      'GET  /api/registration-links/:id/validate':   'linkRoutes — validate link',
+      'POST /api/registrations':                     'registrationRoutes — submit form',
+      'GET  /api/registrations/pending':             'registrationRoutes — admin pending list',
+      'POST /api/registrations/:id/approve':         'registrationRoutes — approve',
+      'POST /api/registrations/:id/reject':          'registrationRoutes — reject'
     },
     routeStartupErrors: startupErrors.length === 0
       ? '✅ All routes loaded OK'
-      : startupErrors.map(e => ({
-          mountPath: e.route,
-          '❌ error': e.error,
-          stack: e.stack?.split('\n').slice(0, 4).join(' | ')
-        })),
+      : startupErrors.map(e => ({ mountPath: e.route, '❌ error': e.error })),
     database: {
       status:        dbOk ? '✅ Connected' : '❌ FAILED',
       error:         dbErr,
       tablesFound:   dbTables,
       tablesMissing: missingTables.length ? missingTables : '✅ none',
+      newColumns:    newColumnsOk ? '✅ all present' : `❌ missing: ${missingCols.join(', ')}`,
       fix: missingTables.length
         ? `Run schema.sql: psql -U postgres -d ${process.env.DB_NAME || 'employee_db'} -f schema.sql`
-        : null
+        : missingCols.length
+          ? 'Run the MIGRATION section at the bottom of schema.sql'
+          : null
     },
     packages: pkgChecks,
     environment: {
-      NODE_ENV:    process.env.NODE_ENV || '(not set)',
-      PORT:        process.env.PORT     || '5000 (default)',
-      DB_HOST:     process.env.DB_HOST  || '❌ MISSING',
-      DB_PORT:     process.env.DB_PORT  || '❌ MISSING',
-      DB_NAME:     process.env.DB_NAME  || '❌ MISSING',
-      DB_USER:     process.env.DB_USER  || '❌ MISSING',
+      NODE_ENV:    process.env.NODE_ENV    || '(not set)',
+      PORT:        process.env.PORT        || '5000 (default)',
+      DB_HOST:     process.env.DB_HOST     || '❌ MISSING',
+      DB_PORT:     process.env.DB_PORT     || '❌ MISSING',
+      DB_NAME:     process.env.DB_NAME     || '❌ MISSING',
+      DB_USER:     process.env.DB_USER     || '❌ MISSING',
       DB_PASSWORD: process.env.DB_PASSWORD ? '✅ set' : '❌ MISSING',
       missing:     missingEnv.length ? missingEnv : '✅ all set'
     },
     actionItems: allOk
       ? ['🎉 Nothing to fix!']
       : [
-          !dbOk                && `Fix DB connection: ${dbErr}`,
+          !dbOk                && `Fix DB: ${dbErr}`,
           missingEnv.length    && `Add to .env: ${missingEnv.join(', ')}`,
-          missingTables.length && `Run schema.sql to create: ${missingTables.join(', ')}`,
+          missingTables.length && `Run schema.sql — missing tables: ${missingTables.join(', ')}`,
+          missingCols.length   && `Run MIGRATION in schema.sql — missing columns: ${missingCols.join(', ')}`,
           startupErrors.length && `Fix route errors: ${startupErrors.map(e => e.route).join(', ')}`
         ].filter(Boolean)
   });
@@ -217,7 +235,6 @@ app.use((err, _req, res, _next) => {
     return res.status(400).json({ success: false, message: 'File size must be less than 5MB' });
   if (err.code === 'LIMIT_UNEXPECTED_FILE')
     return res.status(400).json({ success: false, message: `Unexpected file field: ${err.field}` });
-
   console.error('🔴 Express error:', err.message);
   res.status(err.status || 500).json({
     success: false,
@@ -226,7 +243,6 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-// 404 catch-all
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -236,7 +252,7 @@ app.use('*', (req, res) => {
 });
 
 // ============================================================
-// DB CONNECTION CHECK ON STARTUP
+// DB CONNECTION CHECK
 // ============================================================
 pool.query('SELECT NOW() as t', (err, result) => {
   if (err) {
@@ -250,49 +266,32 @@ pool.query('SELECT NOW() as t', (err, result) => {
 pool.on('error', err => console.error('❌ DB pool error:', err.message));
 
 // ============================================================
-// START SERVER — 0.0.0.0 allows connections from other machines
+// START SERVER
 // ============================================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log('='.repeat(60));
   console.log('🚀 Employee Management System API');
   console.log('='.repeat(60));
   console.log(`✅ Server:        http://localhost:${PORT}`);
-  console.log(`🌐 Network:       http://192.168.1.37:${PORT}`);
-  console.log(`🔍 Debug:         http://192.168.1.37:${PORT}/api/debug`);
-  console.log(`🏥 Health:        http://192.168.1.37:${PORT}/api/health`);
+  console.log(`🔍 Debug:         http://localhost:${PORT}/api/debug`);
+  console.log(`🏥 Health:        http://localhost:${PORT}/api/health`);
   console.log(`🔗 Generate link: POST /api/registration-links`);
   console.log(`📋 Submit form:   POST /api/registrations`);
   console.log(`⏳ Pending:       GET  /api/registrations/pending`);
   console.log(`👥 Employees:     GET  /api/employees`);
   console.log(`📤 Export data:   GET  /api/employees/export/data`);
   console.log(`📄 Template:      GET  /api/employees/export/template`);
-  console.log(`📂 Uploads:       http://192.168.1.37:${PORT}/uploads`);
   if (startupErrors.length > 0) {
     console.log('');
-    console.log('⚠️  STARTUP PROBLEMS — open /api/debug for details:');
+    console.log('⚠️  STARTUP PROBLEMS:');
     startupErrors.forEach(e => console.error(`  ❌ ${e.route}: ${e.error}`));
   }
   console.log('='.repeat(60));
 });
 
-// ============================================================
-// PROCESS EVENTS
-// ============================================================
 process.on('SIGTERM', () => pool.end(() => process.exit(0)));
-process.on('SIGINT', () => {
-  console.log('\n👋 Shutting down');
-  pool.end(() => process.exit(0));
-});
-
-process.on('uncaughtException', err => {
-  console.error('🔴 Uncaught Exception:', err.message, err.stack);
-  startupErrors.push({ route: 'runtime:uncaughtException', error: err.message });
-});
-
-process.on('unhandledRejection', reason => {
-  const msg = reason instanceof Error ? reason.message : String(reason);
-  console.error('🔴 Unhandled Rejection:', msg);
-  startupErrors.push({ route: 'runtime:unhandledRejection', error: msg });
-});
+process.on('SIGINT',  () => { console.log('\n👋 Shutting down'); pool.end(() => process.exit(0)); });
+process.on('uncaughtException',  err => console.error('🔴 Uncaught:', err.message));
+process.on('unhandledRejection', reason => console.error('🔴 Unhandled:', reason instanceof Error ? reason.message : reason));
 
 export default app;

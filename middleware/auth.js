@@ -4,7 +4,6 @@ import pool from '../config/database.js';
 
 export const authenticateAdmin = async (req, res, next) => {
   try {
-    // Get token from header
     const token = req.headers.authorization?.split(' ')[1];
 
     if (!token) {
@@ -14,12 +13,11 @@ export const authenticateAdmin = async (req, res, next) => {
       });
     }
 
-    // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Get admin from database
+    // ✅ Query 'admins' table — this is where your users actually are
     const result = await pool.query(
-      'SELECT id, username, email, role, full_name FROM admin_users WHERE id = $1 AND is_active = true',
+      'SELECT id, username, email, role, full_name FROM admins WHERE id = $1',
       [decoded.id]
     );
 
@@ -32,16 +30,17 @@ export const authenticateAdmin = async (req, res, next) => {
 
     req.admin = result.rows[0];
     next();
+
   } catch (error) {
     console.error('Auth middleware error:', error);
-    
+
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({
         success: false,
         message: 'Invalid token'
       });
     }
-    
+
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
         success: false,

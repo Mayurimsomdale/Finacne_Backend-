@@ -116,6 +116,7 @@ router.get('/:linkId/validate', async (req, res) => {
          e.name_on_pan,
          e.aadhar_number,
          e.name_on_aadhar,
+         e.uan_number,
          e.family_member_name,
          e.family_contact_no,
          e.family_working_status,
@@ -192,6 +193,9 @@ router.get('/:linkId/validate', async (req, res) => {
         nameOnPan:                link.name_on_pan,
         aadhar:                   link.aadhar_number,
         nameOnAadhar:             link.name_on_aadhar,
+                uanNumber:                link.uan_number || '',   // ← ADD THIS
+
+        
         // Contact
         email:                    link.emp_email,
         phone:                    link.phone,

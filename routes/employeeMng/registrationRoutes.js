@@ -1,4 +1,12 @@
 // routes/employeeMng/registrationRoutes.js
+// ✅ FIXED: uan_number added to:
+//   1. commonFields array (reads d.uanNumber from form body)
+//   2. resubmit UPDATE query  ($16 = uan_number, all subsequent params shifted +1)
+//   3. rejoin UPDATE query    (same shift)
+//   4. new employee INSERT    (uan_number column + value added)
+//   5. GET /check-aadhar      (SELECT + returned data object)
+//   6. GET /prefill/:token    (returned data object)
+
 import express     from 'express';
 import multer      from 'multer';
 import path        from 'path';
@@ -6,10 +14,13 @@ import fs          from 'fs';
 import crypto      from 'crypto';
 import { fileURLToPath } from 'url';
 import pool        from '../../config/database.js';
+
+import { generateKYEPdfBuffer } from '../../services/kyePdfService.js';
 import {
   sendFormSubmissionConfirmation,
   sendHRSubmissionNotification,
   sendApprovalEmail,
+  sendApprovalEmailWithKYEPdf,
   sendRejectionEmailWithRelink,
   sendHRApprovalNotification,
   sendHRRejectionNotification,
@@ -76,6 +87,14 @@ const dateStr = (v) => {
 };
 const bool = (v) => v === true || v === 'true' || v === '1';
 
+// ✅ UAN validator — numeric only, max 12 digits, null if blank/invalid
+const strUan = (v) => {
+  const s = str(v);
+  if (!s) return null;
+  const digits = s.replace(/\D/g, '').slice(0, 12);
+  return digits || null;
+};
+
 async function saveDocument(client, empDbId, type, file) {
   if (!file) return;
   await client.query(
@@ -89,23 +108,13 @@ async function saveDocument(client, empDbId, type, file) {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // generateEmployeeId — Format: Insta-YYMMNNN+
-//
-// Examples:
-//   First employee in April 2026  → Insta-26041001
-//   Second employee in April 2026 → Insta-26041002
-//   Employee in May 2026          → Insta-26051003  (sequence keeps going up)
-//
-// The YYMM prefix reflects the CURRENT month of approval.
-// The numeric suffix (starting at 1001) is a GLOBAL ever-increasing sequence
-// that never resets — it just keeps incrementing from the last issued number.
 // ══════════════════════════════════════════════════════════════════════════════
 async function generateEmployeeId(client) {
   const now = new Date();
-  const yy  = String(now.getFullYear()).slice(-2);          // "26"
-  const mm  = String(now.getMonth() + 1).padStart(2, '0'); // "04"
-  const prefix = `Insta-${yy}${mm}`;                       // "Insta-2604"
+  const yy  = String(now.getFullYear()).slice(-2);
+  const mm  = String(now.getMonth() + 1).padStart(2, '0');
+  const prefix = `Insta-${yy}${mm}`;
 
-  // Find the last issued Insta- ID (any month) to get the running sequence
   const { rows } = await client.query(`
     SELECT employee_id
     FROM employees
@@ -115,17 +124,16 @@ async function generateEmployeeId(client) {
     LIMIT 1
   `);
 
-  let nextSeq = 1001; // default starting sequence number
+  let nextSeq = 1001;
   if (rows[0]) {
-    // e.g. "Insta-25092077" → strip "Insta-" → "25092077" → skip first 4 digits (YYMM) → "2077"
-    const lastId      = rows[0].employee_id;               // "Insta-25092077"
-    const withoutTag  = lastId.replace(/^Insta-/, '');     // "25092077"
-    const seqStr      = withoutTag.slice(4);               // skip YYMM → "2077"
-    const lastSeq     = parseInt(seqStr, 10);
+    const lastId     = rows[0].employee_id;
+    const withoutTag = lastId.replace(/^Insta-/, '');
+    const seqStr     = withoutTag.slice(4);
+    const lastSeq    = parseInt(seqStr, 10);
     if (!isNaN(lastSeq)) nextSeq = lastSeq + 1;
   }
 
-  return `${prefix}${nextSeq}`; // "Insta-26042078"
+  return `${prefix}${nextSeq}`;
 }
 
 // ── Helper: restore employee from snapshot ────────────────────────────────────
@@ -150,29 +158,30 @@ async function restoreFromSnapshot(client, empId, snapshot, newStatus = 'inactiv
       educational_qualification=$11, blood_group=$12,
       pan_number=$13, name_on_pan=$14,
       aadhar_number=$15, name_on_aadhar=$16,
-      family_member_name=$17, family_contact_no=$18, family_working_status=$19,
-      family_employer_name=$20, family_employer_contact=$21,
-      emergency_contact_name=$22, emergency_contact_no=$23,
-      emergency_contact_address=$24, emergency_contact_relation=$25,
-      permanent_address=$26, permanent_phone=$27, permanent_landmark=$28, permanent_lat_long=$29,
-      local_same_as_permanent=$30, local_address=$31, local_phone=$32,
-      local_landmark=$33, local_lat_long=$34,
-      ref1_name=$35, ref1_designation=$36, ref1_organization=$37, ref1_address=$38,
-      ref1_city_state_pin=$39, ref1_contact_no=$40, ref1_email=$41,
-      ref2_name=$42, ref2_designation=$43, ref2_organization=$44, ref2_address=$45,
-      ref2_city_state_pin=$46, ref2_contact_no=$47, ref2_email=$48,
-      ref3_name=$49, ref3_designation=$50, ref3_organization=$51, ref3_address=$52,
-      ref3_city_state_pin=$53, ref3_contact_no=$54, ref3_email=$55,
-      department=$56, position=$57, joining_date=$58, employment_type=$59,
-      circle=$60, project_name=$61, reporting_manager=$62,
-      bank_name=$63, account_number=$64, ifsc_code=$65,
-      account_holder_name=$66, bank_branch=$67,
-      basic_salary=$68, hra=$69, other_allowances=$70,
-      address=$71, city=$72, state=$73, zip_code=$74,
-      status=$75,
+      uan_number=$17,
+      family_member_name=$18, family_contact_no=$19, family_working_status=$20,
+      family_employer_name=$21, family_employer_contact=$22,
+      emergency_contact_name=$23, emergency_contact_no=$24,
+      emergency_contact_address=$25, emergency_contact_relation=$26,
+      permanent_address=$27, permanent_phone=$28, permanent_landmark=$29, permanent_lat_long=$30,
+      local_same_as_permanent=$31, local_address=$32, local_phone=$33,
+      local_landmark=$34, local_lat_long=$35,
+      ref1_name=$36, ref1_designation=$37, ref1_organization=$38, ref1_address=$39,
+      ref1_city_state_pin=$40, ref1_contact_no=$41, ref1_email=$42,
+      ref2_name=$43, ref2_designation=$44, ref2_organization=$45, ref2_address=$46,
+      ref2_city_state_pin=$47, ref2_contact_no=$48, ref2_email=$49,
+      ref3_name=$50, ref3_designation=$51, ref3_organization=$52, ref3_address=$53,
+      ref3_city_state_pin=$54, ref3_contact_no=$55, ref3_email=$56,
+      department=$57, position=$58, joining_date=$59, employment_type=$60,
+      circle=$61, project_name=$62, reporting_manager=$63,
+      bank_name=$64, account_number=$65, ifsc_code=$66,
+      account_holder_name=$67, bank_branch=$68,
+      basic_salary=$69, hra=$70, other_allowances=$71,
+      address=$72, city=$73, state=$74, zip_code=$75,
+      status=$76,
       rejoin_snapshot=NULL, active_rejoin_link_id=NULL,
       updated_at=CURRENT_TIMESTAMP
-    WHERE id=$76
+    WHERE id=$77
   `, [
     s.first_name, s.last_name, s.middle_name, s.father_husband_name,
     s.email, s.phone, s.alt_phone,
@@ -180,6 +189,7 @@ async function restoreFromSnapshot(client, empId, snapshot, newStatus = 'inactiv
     s.educational_qualification, s.blood_group,
     s.pan_number, s.name_on_pan,
     s.aadhar_number, s.name_on_aadhar,
+    s.uan_number || null,                           // ✅ $17 — was missing
     s.family_member_name, s.family_contact_no, s.family_working_status,
     s.family_employer_name, s.family_employer_contact,
     s.emergency_contact_name, s.emergency_contact_no,
@@ -206,6 +216,7 @@ async function restoreFromSnapshot(client, empId, snapshot, newStatus = 'inactiv
 
 // =============================================================================
 // GET /api/registrations/check-aadhar/:aadhar
+// ✅ FIXED: uan_number added to SELECT and returned data object
 // =============================================================================
 router.get('/check-aadhar/:aadhar', async (req, res) => {
   const client = await pool.connect();
@@ -234,7 +245,8 @@ router.get('/check-aadhar/:aadhar', async (req, res) => {
               ref3_name, ref3_designation, ref3_organization, ref3_address,
               ref3_city_state_pin, ref3_contact_no, ref3_email,
               bank_name, account_number, ifsc_code, account_holder_name, bank_branch,
-              joining_date, reporting_manager, employment_type, circle, project_name
+              joining_date, reporting_manager, employment_type, circle, project_name,
+              uan_number
       FROM employees
       WHERE aadhar_number = $1
       ORDER BY created_at DESC
@@ -244,12 +256,15 @@ router.get('/check-aadhar/:aadhar', async (req, res) => {
 
     if (!rows[0]) return res.json({ exists: false });
 
-    const emp = rows[0];
+   const emp = rows[0];
+    const REJOINABLE = new Set(['inactive', 'rejected']);
     return res.json({
       exists:     true,
       status:     emp.status,
+      canRejoin:  REJOINABLE.has(emp.status),   // ← ADD THIS
       employeeId: emp.employee_id,
       data: {
+
         firstName:                emp.first_name,
         fatherHusbandName:        emp.father_husband_name,
         lastName:                 emp.last_name,
@@ -262,6 +277,7 @@ router.get('/check-aadhar/:aadhar', async (req, res) => {
         nameOnPan:                emp.name_on_pan,
         aadhar:                   emp.aadhar_number,
         nameOnAadhar:             emp.name_on_aadhar,
+        uanNumber:                emp.uan_number || '',   
         email:                    emp.email,
         phone:                    emp.phone,
         altPhone:                 emp.alt_phone,
@@ -319,7 +335,7 @@ router.get('/check-aadhar/:aadhar', async (req, res) => {
 
 // =============================================================================
 // POST /api/registrations
-// Handles: normal registration, resubmit (rejected), AND rejoin (inactive)
+// ✅ FIXED: uan_number added to commonFields and all three SQL statements
 // =============================================================================
 router.post('/', async (req, res) => {
   try { await applyMulter(req, res); } catch (uploadErr) {
@@ -424,6 +440,8 @@ router.post('/', async (req, res) => {
 
     let employeeDbId;
 
+    // ✅ FIXED: commonFields now includes uan_number at position [16] (0-indexed 15)
+   
     const commonFields = [
       str(d.firstName), str(d.fatherHusbandName), str(d.lastName),
       email, str(d.phone), str(d.altPhone),
@@ -431,6 +449,7 @@ router.post('/', async (req, res) => {
       str(d.educationalQualification), str(d.bloodGroup),
       str(d.panNumber)?.toUpperCase() || null, str(d.nameOnPan),
       str(d.aadhar)?.replace(/\s/g,'') || null, str(d.nameOnAadhar),
+      strUan(d.uanNumber),                                              // ✅ position [15] → SQL $16
       str(d.familyMemberName), str(d.familyContactNo), str(d.familyWorkingStatus),
       str(d.familyEmployerName), str(d.familyEmployerContact),
       str(d.emergencyContactName), str(d.emergencyContactNo),
@@ -455,8 +474,11 @@ router.post('/', async (req, res) => {
       str(d.ifscCode)?.toUpperCase() || null,
       str(d.accountHolderName), str(d.bankBranch),
     ];
+    // commonFields.length = 67  → SQL params $1..$67, then empId = $68
 
     if (isResubmit) {
+      // ✅ FIXED: uan_number = $16, all subsequent params shifted by +1
+      // Previous last param was $66 (existingEmpId), now it is $68
       const { rows: updRows } = await client.query(`
         UPDATE employees SET
           first_name = $1, father_husband_name = $2, last_name = $3,
@@ -465,30 +487,31 @@ router.post('/', async (req, res) => {
           educational_qualification = $10, blood_group = $11,
           pan_number = $12, name_on_pan = $13,
           aadhar_number = $14, name_on_aadhar = $15,
-          family_member_name = $16, family_contact_no = $17, family_working_status = $18,
-          family_employer_name = $19, family_employer_contact = $20,
-          emergency_contact_name = $21, emergency_contact_no = $22,
-          emergency_contact_address = $23, emergency_contact_relation = $24,
-          permanent_address = $25, permanent_phone = $26,
-          permanent_landmark = $27, permanent_lat_long = $28,
-          local_same_as_permanent = $29,
-          local_address = $30, local_phone = $31, local_landmark = $32, local_lat_long = $33,
-          ref1_name = $34, ref1_designation = $35, ref1_organization = $36,
-          ref1_address = $37, ref1_city_state_pin = $38, ref1_contact_no = $39, ref1_email = $40,
-          ref2_name = $41, ref2_designation = $42, ref2_organization = $43,
-          ref2_address = $44, ref2_city_state_pin = $45, ref2_contact_no = $46, ref2_email = $47,
-          ref3_name = $48, ref3_designation = $49, ref3_organization = $50,
-          ref3_address = $51, ref3_city_state_pin = $52, ref3_contact_no = $53, ref3_email = $54,
-          department = $55, position = $56,
-          circle = $57, project_name = $58,
-          joining_date = $59, reporting_manager = $60, employment_type = $61,
-          bank_name = $62, account_number = $63, ifsc_code = $64,
-          account_holder_name = $65, bank_branch = $66,
+          uan_number = $16,
+          family_member_name = $17, family_contact_no = $18, family_working_status = $19,
+          family_employer_name = $20, family_employer_contact = $21,
+          emergency_contact_name = $22, emergency_contact_no = $23,
+          emergency_contact_address = $24, emergency_contact_relation = $25,
+          permanent_address = $26, permanent_phone = $27,
+          permanent_landmark = $28, permanent_lat_long = $29,
+          local_same_as_permanent = $30,
+          local_address = $31, local_phone = $32, local_landmark = $33, local_lat_long = $34,
+          ref1_name = $35, ref1_designation = $36, ref1_organization = $37,
+          ref1_address = $38, ref1_city_state_pin = $39, ref1_contact_no = $40, ref1_email = $41,
+          ref2_name = $42, ref2_designation = $43, ref2_organization = $44,
+          ref2_address = $45, ref2_city_state_pin = $46, ref2_contact_no = $47, ref2_email = $48,
+          ref3_name = $49, ref3_designation = $50, ref3_organization = $51,
+          ref3_address = $52, ref3_city_state_pin = $53, ref3_contact_no = $54, ref3_email = $55,
+          department = $56, position = $57,
+          circle = $58, project_name = $59,
+          joining_date = $60, reporting_manager = $61, employment_type = $62,
+          bank_name = $63, account_number = $64, ifsc_code = $65,
+          account_holder_name = $66, bank_branch = $67,
           status = 'pending',
           rejection_reason = NULL, rejected_by = NULL, rejected_at = NULL,
           resubmit_token = NULL, resubmit_expires_at = NULL,
           updated_at = CURRENT_TIMESTAMP
-        WHERE id = $67
+        WHERE id = $68
         RETURNING id
       `, [...commonFields, existingEmpId]);
 
@@ -504,6 +527,7 @@ router.post('/', async (req, res) => {
       }
 
     } else if (isRejoin) {
+      // ✅ FIXED: uan_number = $16, all subsequent params shifted by +1
       const { rows: updRows } = await client.query(`
         UPDATE employees SET
           first_name = $1, father_husband_name = $2, last_name = $3,
@@ -512,31 +536,32 @@ router.post('/', async (req, res) => {
           educational_qualification = $10, blood_group = $11,
           pan_number = $12, name_on_pan = $13,
           aadhar_number = $14, name_on_aadhar = $15,
-          family_member_name = $16, family_contact_no = $17, family_working_status = $18,
-          family_employer_name = $19, family_employer_contact = $20,
-          emergency_contact_name = $21, emergency_contact_no = $22,
-          emergency_contact_address = $23, emergency_contact_relation = $24,
-          permanent_address = $25, permanent_phone = $26,
-          permanent_landmark = $27, permanent_lat_long = $28,
-          local_same_as_permanent = $29,
-          local_address = $30, local_phone = $31, local_landmark = $32, local_lat_long = $33,
-          ref1_name = $34, ref1_designation = $35, ref1_organization = $36,
-          ref1_address = $37, ref1_city_state_pin = $38, ref1_contact_no = $39, ref1_email = $40,
-          ref2_name = $41, ref2_designation = $42, ref2_organization = $43,
-          ref2_address = $44, ref2_city_state_pin = $45, ref2_contact_no = $46, ref2_email = $47,
-          ref3_name = $48, ref3_designation = $49, ref3_organization = $50,
-          ref3_address = $51, ref3_city_state_pin = $52, ref3_contact_no = $53, ref3_email = $54,
-          department = $55, position = $56,
-          circle = $57, project_name = $58,
-          joining_date = $59, reporting_manager = $60, employment_type = $61,
-          bank_name = $62, account_number = $63, ifsc_code = $64,
-          account_holder_name = $65, bank_branch = $66,
+          uan_number = $16,
+          family_member_name = $17, family_contact_no = $18, family_working_status = $19,
+          family_employer_name = $20, family_employer_contact = $21,
+          emergency_contact_name = $22, emergency_contact_no = $23,
+          emergency_contact_address = $24, emergency_contact_relation = $25,
+          permanent_address = $26, permanent_phone = $27,
+          permanent_landmark = $28, permanent_lat_long = $29,
+          local_same_as_permanent = $30,
+          local_address = $31, local_phone = $32, local_landmark = $33, local_lat_long = $34,
+          ref1_name = $35, ref1_designation = $36, ref1_organization = $37,
+          ref1_address = $38, ref1_city_state_pin = $39, ref1_contact_no = $40, ref1_email = $41,
+          ref2_name = $42, ref2_designation = $43, ref2_organization = $44,
+          ref2_address = $45, ref2_city_state_pin = $46, ref2_contact_no = $47, ref2_email = $48,
+          ref3_name = $49, ref3_designation = $50, ref3_organization = $51,
+          ref3_address = $52, ref3_city_state_pin = $53, ref3_contact_no = $54, ref3_email = $55,
+          department = $56, position = $57,
+          circle = $58, project_name = $59,
+          joining_date = $60, reporting_manager = $61, employment_type = $62,
+          bank_name = $63, account_number = $64, ifsc_code = $65,
+          account_holder_name = $66, bank_branch = $67,
           status = 'pending_rejoin',
           rejection_reason = NULL, rejected_by = NULL, rejected_at = NULL,
           resubmit_token = NULL, resubmit_expires_at = NULL,
           rejoin_requested_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP
-        WHERE id = $67
+        WHERE id = $68
         RETURNING id
       `, [...commonFields, existingEmpId]);
 
@@ -557,7 +582,8 @@ router.post('/', async (req, res) => {
       );
 
     } else {
-      // ── INSERT new employee (normal registration) ──
+      // ✅ FIXED: uan_number column + $17 value added to INSERT
+      // link.id = $1, then commonFields $2..$68, then address fields $69..$72, status $73
       const { rows: empRows } = await client.query(`
         INSERT INTO employees (
           registration_link_id,
@@ -566,6 +592,7 @@ router.post('/', async (req, res) => {
           date_of_birth, gender, marital_status,
           educational_qualification, blood_group,
           pan_number, name_on_pan, aadhar_number, name_on_aadhar,
+          uan_number,
           family_member_name, family_contact_no, family_working_status,
           family_employer_name, family_employer_contact,
           emergency_contact_name, emergency_contact_no,
@@ -581,24 +608,107 @@ router.post('/', async (req, res) => {
           address, city, state, zip_code,
           status
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+          $1,
+          $2,$3,$4,
+          $5,$6,$7,
+          $8,$9,$10,
+          $11,$12,
           $13,$14,$15,$16,
-          $17,$18,$19,$20,$21,
-          $22,$23,$24,$25,
-          $26,$27,$28,$29,
-          $30,$31,$32,$33,$34,
-          $35,$36,$37,$38,$39,$40,$41,
-          $42,$43,$44,$45,$46,$47,$48,
-          $49,$50,$51,$52,$53,$54,$55,
-          $56,$57,$58,$59,$60,$61,$62,
-          $63,$64,$65,$66,$67,
-          $68,$69,$70,$71,
-          $72
+          $17,
+          $18,$19,$20,
+          $21,$22,
+          $23,$24,
+          $25,$26,
+          $27,$28,$29,$30,
+          $31,$32,$33,$34,$35,
+          $36,$37,$38,$39,$40,$41,$42,
+          $43,$44,$45,$46,$47,$48,$49,
+          $50,$51,$52,$53,$54,$55,$56,
+          $57,$58,$59,$60,
+          $61,$62,$63,
+          $64,$65,$66,$67,$68,
+          $69,$70,$71,$72,
+          $73
         ) RETURNING id
       `, [
         link.id,
-        ...commonFields,
+        // $2–$16: personal fields (firstName…nameOnAadhar) from commonFields[0..14]
+        commonFields[0],  // first_name
+        commonFields[1],  // father_husband_name
+        commonFields[2],  // last_name
+        commonFields[3],  // email
+        commonFields[4],  // phone
+        commonFields[5],  // alt_phone
+        commonFields[6],  // date_of_birth
+        commonFields[7],  // gender
+        commonFields[8],  // marital_status
+        commonFields[9],  // educational_qualification
+        commonFields[10], // blood_group
+        commonFields[11], // pan_number
+        commonFields[12], // name_on_pan
+        commonFields[13], // aadhar_number
+        commonFields[14], // name_on_aadhar
+        // $17: uan_number ✅
+        commonFields[15], // uan_number
+        // $18–$35: family, emergency
+        commonFields[16], // family_member_name
+        commonFields[17], // family_contact_no
+        commonFields[18], // family_working_status
+        commonFields[19], // family_employer_name
+        commonFields[20], // family_employer_contact
+        commonFields[21], // emergency_contact_name
+        commonFields[22], // emergency_contact_no
+        commonFields[23], // emergency_contact_address
+        commonFields[24], // emergency_contact_relation
+        // $27–$35: permanent address
+        commonFields[25], // permanent_address
+        commonFields[26], // permanent_phone
+        commonFields[27], // permanent_landmark
+        commonFields[28], // permanent_lat_long
+        // $31–$35: local address
+        commonFields[29], // local_same_as_permanent
+        commonFields[30], // local_address
+        commonFields[31], // local_phone
+        commonFields[32], // local_landmark
+        commonFields[33], // local_lat_long
+        // $36–$56: references
+        commonFields[34], // ref1_name
+        commonFields[35], // ref1_designation
+        commonFields[36], // ref1_organization
+        commonFields[37], // ref1_address
+        commonFields[38], // ref1_city_state_pin
+        commonFields[39], // ref1_contact_no
+        commonFields[40], // ref1_email
+        commonFields[41], // ref2_name
+        commonFields[42], // ref2_designation
+        commonFields[43], // ref2_organization
+        commonFields[44], // ref2_address
+        commonFields[45], // ref2_city_state_pin
+        commonFields[46], // ref2_contact_no
+        commonFields[47], // ref2_email
+        commonFields[48], // ref3_name
+        commonFields[49], // ref3_designation
+        commonFields[50], // ref3_organization
+        commonFields[51], // ref3_address
+        commonFields[52], // ref3_city_state_pin
+        commonFields[53], // ref3_contact_no
+        commonFields[54], // ref3_email
+        // $57–$68: employment + bank
+        commonFields[55], // department
+        commonFields[56], // position
+        commonFields[57], // circle
+        commonFields[58], // project_name
+        commonFields[59], // joining_date
+        commonFields[60], // reporting_manager
+        commonFields[61], // employment_type
+        commonFields[62], // bank_name
+        commonFields[63], // account_number
+        commonFields[64], // ifsc_code
+        commonFields[65], // account_holder_name
+        commonFields[66], // bank_branch
+        // $69–$72: legacy address fields
         str(d.permanentAddress) || '', '', '', '',
+        // $73: status
         'pending',
       ]);
 
@@ -653,12 +763,13 @@ router.post('/', async (req, res) => {
 
 // =============================================================================
 // GET /api/registrations/prefill/:token
+// ✅ FIXED: uan_number added to returned data object
 // =============================================================================
 router.get('/prefill/:token', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { rows } = await client.query(
-      `SELECT e.*,
+    const { rows } = await client.query(`
+      SELECT e.*,
         COALESCE(
           json_agg(json_build_object(
             'type', d.document_type, 'path', d.file_path,
@@ -700,6 +811,7 @@ router.get('/prefill/:token', async (req, res) => {
         nameOnPan:                 emp.name_on_pan,
         aadhar:                    emp.aadhar_number,
         nameOnAadhar:              emp.name_on_aadhar,
+        uanNumber:                 emp.uan_number || '',   // ✅ FIXED
         email:                     emp.email,
         phone:                     emp.phone,
         altPhone:                  emp.alt_phone,
@@ -779,6 +891,7 @@ router.get('/pending', async (req, res) => {
       GROUP BY e.id, rl.link_id, rl.employee_email
       ORDER BY e.created_at DESC
     `);
+    // uan_number is included via e.* — no change needed here
     return res.json({ success: true, count: rows.length, data: rows });
   } catch (err) {
     console.error('❌ [GET /registrations/pending]', err.message);
@@ -790,70 +903,124 @@ router.get('/pending', async (req, res) => {
 
 // =============================================================================
 // POST /api/registrations/:id/approve
-// ── Generates new Employee ID in Insta-YYMM#### format ──
 // =============================================================================
 router.post('/:id/approve', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { id }  = req.params;
-    const adminId = req.admin?.id || null;
-
-    // ── Generate new Employee ID: Insta-YYMM#### ─────────────────────────────
-    // Format breakdown:
-    //   Insta-  → fixed prefix
-    //   YY      → 2-digit year of approval  (e.g. "26")
-    //   MM      → 2-digit month of approval (e.g. "04")
-    //   ####    → global ever-increasing sequence, starting at 1001
-    //
-    // Examples: Insta-26041001, Insta-26041002, Insta-26051003
-    // The sequence never resets between months — it just keeps going up.
-    // ─────────────────────────────────────────────────────────────────────────
-    const newEmpId = await generateEmployeeId(client);
+    const { id }   = req.params;
+    const isRejoin = req.body?.isRejoin === true || req.body?.isRejoin === 'true';
 
     const { rows } = await client.query(`
-      UPDATE employees
-        SET status='active', employee_id=$1, approved_by=$2, approved_at=CURRENT_TIMESTAMP,
-            rejoin_snapshot=NULL, active_rejoin_link_id=NULL
-      WHERE id=$3 RETURNING *
-    `, [newEmpId, adminId, id]);
-
-    if (!rows[0]) return res.status(404).json({ success: false, message: 'Submission not found' });
-
-    const emp = rows[0];
-    const isRejoin = emp.rejoin_requested_at != null;
-
-    // ── Normalise "idPhoto" → "photo" in employee_documents ──────────────────
-    await client.query(`
-      UPDATE employee_documents
-      SET document_type = 'photo'
-      WHERE employee_id = $1
-        AND document_type = 'idPhoto'
+      SELECT e.*,
+        COALESCE(
+          json_agg(json_build_object(
+            'type',      d.document_type,
+            'path',      d.file_path,
+            'file_path', d.file_path,
+            'name',      d.file_name,
+            'mime_type', d.mime_type
+          )) FILTER (WHERE d.id IS NOT NULL),
+          '[]'::json
+        ) AS documents
+      FROM employees e
+      LEFT JOIN employee_documents d ON d.employee_id = e.id
+      WHERE e.id = $1
+      GROUP BY e.id
     `, [id]);
 
-    console.log(`✅ Approved: ${newEmpId} (${isRejoin ? 'rejoin' : 'new'})`);
+    if (!rows[0]) {
+      return res.status(404).json({ success: false, message: 'Employee not found' });
+    }
+
+    const employee = rows[0];
+    const newEmployeeId = await generateEmployeeId(client);
+
+    const uploadToken  = crypto.randomBytes(32).toString('hex');
+    const uploadExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    const previousEmployeeId = employee.employee_id;
+    await client.query(`
+      UPDATE employees SET
+        status                   = 'active',
+        employee_id              = $1,
+        approved_at              = CURRENT_TIMESTAMP,
+        updated_at               = CURRENT_TIMESTAMP,
+        rejoin_snapshot          = NULL,
+        active_rejoin_link_id    = NULL,
+        active_doc_upload_token  = $2,
+        docs_submitted           = false
+      WHERE id = $3
+    `, [newEmployeeId, uploadToken, id]);
+
+    const { rows: tokenRows } = await client.query(
+      `INSERT INTO employee_doc_upload_tokens
+         (token, employee_id, employee_emp_id, expires_at)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [uploadToken, id, newEmployeeId, uploadExpiry]
+    );
+
+    await client.query('COMMIT');
+    console.log(`✅ [APPROVE] Employee id=${id} approved as ${newEmployeeId}`);
+
+    const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const uploadUrl    = `${FRONTEND_URL}/upload-documents/${uploadToken}`;
+
+    let pdfBase64 = null;
+    try {
+      console.log(`📄 [APPROVE] Generating KYE PDF for ${newEmployeeId}...`);
+      const pdfBuffer = await generateKYEPdfBuffer(employee, newEmployeeId);
+      if (pdfBuffer && Buffer.isBuffer(pdfBuffer) && pdfBuffer.length > 0) {
+        pdfBase64 = pdfBuffer.toString('base64');
+        console.log(`✅ [APPROVE] PDF ready — ${Math.round(pdfBuffer.length / 1024)} KB`);
+      }
+    } catch (pdfErr) {
+      console.error('❌ [APPROVE] PDF generation failed:', pdfErr.message);
+    }
 
     setImmediate(async () => {
-      if (emp.email) {
-        await sendApprovalEmail({
-          to:         emp.email,
-          firstName:  emp.first_name,
-          lastName:   emp.last_name,
-          employeeId: newEmpId,
+      try {
+        console.log(`📧 [APPROVE] Sending approval email to: ${employee.email}`);
+        await sendApprovalEmailWithKYEPdf({
+          to:         employee.email,
+          firstName:  employee.first_name,
+          lastName:   employee.last_name,
+          employeeId: newEmployeeId,
           isRejoin,
-        }).catch(e => console.error('Approval email failed:', e.message));
+          pdfBase64,
+          uploadUrl,
+          uploadExpiresAt: uploadExpiry.toISOString(),
+        });
+        console.log(`✅ [APPROVE] Email sent`);
+      } catch (e) {
+        console.error('❌ [APPROVE] Email failed:', e.message);
       }
-      await sendHRApprovalNotification({
-        firstName:  emp.first_name,
-        lastName:   emp.last_name,
-        employeeId: newEmpId,
-        email:      emp.email,
-        department: emp.department,
-        isRejoin,
-      }).catch(e => console.error('HR approval notification failed:', e.message));
+
+      try {
+        await sendHRApprovalNotification({
+          firstName:          employee.first_name,
+          lastName:           employee.last_name,
+          employeeId:         newEmployeeId,
+          previousEmployeeId: isRejoin ? previousEmployeeId : undefined,
+          email:              employee.email,
+          department:         employee.department,
+          isRejoin,
+        });
+      } catch (e) {
+        console.error('⚠️ [APPROVE] HR notification failed:', e.message);
+      }
     });
 
-    return res.json({ success: true, message: `Approved — Employee ID: ${newEmpId}`, data: rows[0] });
+    return res.json({
+      success:    true,
+      employeeId: newEmployeeId,
+      uploadUrl,
+      pdfQueued:  true,
+      message:    `Employee approved as ${newEmployeeId}. Approval email with upload link queued.`,
+    });
+
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('❌ [POST /registrations/:id/approve]', err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
@@ -863,7 +1030,6 @@ router.post('/:id/approve', async (req, res) => {
 
 // =============================================================================
 // POST /api/registrations/:id/reject
-// For NEW registrations only — creates resubmit token.
 // =============================================================================
 router.post('/:id/reject', async (req, res) => {
   const client = await pool.connect();
@@ -924,7 +1090,6 @@ router.post('/:id/reject', async (req, res) => {
 
 // =============================================================================
 // POST /api/registrations/:id/reject-rejoin
-// For REJOIN submissions only.
 // =============================================================================
 router.post('/:id/reject-rejoin', async (req, res) => {
   const client = await pool.connect();
@@ -946,23 +1111,83 @@ router.post('/:id/reject-rejoin', async (req, res) => {
     }
 
     await client.query('BEGIN');
-
     await restoreFromSnapshot(client, emp.id, emp.rejoin_snapshot, 'inactive');
-
     await client.query(
       `UPDATE employees SET rejection_reason=$1, rejected_at=CURRENT_TIMESTAMP WHERE id=$2`,
       [reason, emp.id]
     );
+    await client.query(
+      `DELETE FROM registration_links WHERE employee_email=$1 AND is_rejoin=true`,
+      [emp.email]
+    );
+
+    // ── Generate a fresh rejoin re-edit link ──────────────────────────────
+    const { v4: uuidv4 } = await import('uuid');
+    const crypto = (await import('crypto')).default;
+    const linkId    = uuidv4();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    const { default: poolImported } = await import('../../config/database.js').catch(() => ({ default: client }));
 
     await client.query(
-      `DELETE FROM registration_links
-       WHERE employee_email=$1 AND is_rejoin=true`,
-      [emp.email]
+      `INSERT INTO registration_links
+         (link_id, employee_email, status, expires_at, is_used,
+          is_rejoin, prefill_employee_id, multi_use, use_count)
+       VALUES ($1, $2, 'active', $3, false, true, $4, false, 0)`,
+      [linkId, emp.email, expiresAt, emp.id]
+    );
+
+    // Save snapshot + link on employee so re-edit link works
+    const { buildSnapshot } = { buildSnapshot: (e) => ({
+      first_name: e.first_name, last_name: e.last_name, middle_name: e.middle_name,
+      father_husband_name: e.father_husband_name, email: e.email, phone: e.phone,
+      alt_phone: e.alt_phone, date_of_birth: e.date_of_birth, gender: e.gender,
+      marital_status: e.marital_status, educational_qualification: e.educational_qualification,
+      blood_group: e.blood_group, pan_number: e.pan_number, name_on_pan: e.name_on_pan,
+      aadhar_number: e.aadhar_number, name_on_aadhar: e.name_on_aadhar,
+      uan_number: e.uan_number,
+      family_member_name: e.family_member_name, family_contact_no: e.family_contact_no,
+      family_working_status: e.family_working_status, family_employer_name: e.family_employer_name,
+      family_employer_contact: e.family_employer_contact,
+      emergency_contact_name: e.emergency_contact_name, emergency_contact_no: e.emergency_contact_no,
+      emergency_contact_address: e.emergency_contact_address,
+      emergency_contact_relation: e.emergency_contact_relation,
+      permanent_address: e.permanent_address, permanent_phone: e.permanent_phone,
+      permanent_landmark: e.permanent_landmark, permanent_lat_long: e.permanent_lat_long,
+      local_same_as_permanent: e.local_same_as_permanent, local_address: e.local_address,
+      local_phone: e.local_phone, local_landmark: e.local_landmark, local_lat_long: e.local_lat_long,
+      ref1_name: e.ref1_name, ref1_designation: e.ref1_designation, ref1_organization: e.ref1_organization,
+      ref1_address: e.ref1_address, ref1_city_state_pin: e.ref1_city_state_pin,
+      ref1_contact_no: e.ref1_contact_no, ref1_email: e.ref1_email,
+      ref2_name: e.ref2_name, ref2_designation: e.ref2_designation, ref2_organization: e.ref2_organization,
+      ref2_address: e.ref2_address, ref2_city_state_pin: e.ref2_city_state_pin,
+      ref2_contact_no: e.ref2_contact_no, ref2_email: e.ref2_email,
+      ref3_name: e.ref3_name, ref3_designation: e.ref3_designation, ref3_organization: e.ref3_organization,
+      ref3_address: e.ref3_address, ref3_city_state_pin: e.ref3_city_state_pin,
+      ref3_contact_no: e.ref3_contact_no, ref3_email: e.ref3_email,
+      department: e.department, position: e.position, joining_date: e.joining_date,
+      employment_type: e.employment_type, circle: e.circle, project_name: e.project_name,
+      reporting_manager: e.reporting_manager, bank_name: e.bank_name, account_number: e.account_number,
+      ifsc_code: e.ifsc_code, account_holder_name: e.account_holder_name, bank_branch: e.bank_branch,
+      basic_salary: e.basic_salary, hra: e.hra, other_allowances: e.other_allowances,
+      address: e.address, city: e.city, state: e.state, zip_code: e.zip_code,
+      status: e.status, employee_id: e.employee_id,
+    })};
+
+    const snapshot = buildSnapshot(emp);
+    await client.query(
+      `UPDATE employees SET
+         rejoin_snapshot=$1, active_rejoin_link_id=$2, updated_at=CURRENT_TIMESTAMP
+       WHERE id=$3`,
+      [JSON.stringify(snapshot), linkId, emp.id]
     );
 
     await client.query('COMMIT');
 
-    console.log(`↩️  Rejoin rejected for employee ${emp.id} — snapshot restored, status=inactive`);
+    const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const rejoinUrl    = `${FRONTEND_URL}/registration/${linkId}`;
+
+    console.log(`↩️  Rejoin declined for employee ${emp.id} — snapshot restored, new re-edit link: ${linkId}`);
 
     setImmediate(async () => {
       try {
@@ -974,6 +1199,8 @@ router.post('/:id/reject-rejoin', async (req, res) => {
             lastName:   emp.last_name,
             employeeId: emp.employee_id,
             reason:     reason || '',
+            rejoinUrl,                          // ← NEW
+            rejoinUrlExpiry: expiresAt.toISOString(), // ← NEW
           });
         }
       } catch (e) {
@@ -983,7 +1210,7 @@ router.post('/:id/reject-rejoin', async (req, res) => {
 
     return res.json({
       success: true,
-      message: 'Rejoin request declined — employee data restored to pre-submission state and set to Inactive.',
+      message: 'Rejoin request declined — employee data restored. A re-edit link has been sent to the employee.',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -994,62 +1221,158 @@ router.post('/:id/reject-rejoin', async (req, res) => {
   }
 });
 
-// =============================================================================
-// GET /api/registrations/validate/:linkId
-// =============================================================================
+
+// Replace the entire GET /validate/:linkId handler in
+// routes/employeeMng/registrationRoutes.js with this:
+
 router.get('/validate/:linkId', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { rows } = await client.query(
-      `SELECT rl.*, e.id AS emp_db_id,
-              e.first_name, e.last_name, e.father_husband_name,
-              e.email, e.phone, e.alt_phone,
-              e.date_of_birth, e.gender, e.marital_status,
-              e.educational_qualification, e.blood_group,
-              e.pan_number, e.name_on_pan, e.aadhar_number, e.name_on_aadhar,
-              e.department, e.position, e.joining_date, e.employment_type,
-              e.reporting_manager, e.circle, e.project_name,
-              e.bank_name, e.account_number, e.ifsc_code,
-              e.account_holder_name, e.bank_branch,
-              e.employee_id AS old_employee_id, e.status AS emp_status
-       FROM registration_links rl
-       LEFT JOIN employees e ON e.id = rl.prefill_employee_id
-       WHERE rl.link_id = $1`,
+    // Step 1: fetch the link itself (no JOIN to employees — avoids column miss)
+    const { rows: linkRows } = await client.query(
+      `SELECT * FROM registration_links WHERE link_id = $1`,
       [req.params.linkId]
     );
 
-    if (!rows[0]) return res.status(404).json({ success: false, message: 'Invalid registration link' });
-    const link = rows[0];
-    if (link.is_used)                           return res.status(410).json({ success: false, used: true,    message: 'Link already used.' });
-    if (new Date(link.expires_at) < new Date()) return res.status(410).json({ success: false, expired: true, message: 'Link expired.' });
-
-    let prefillData = null;
-    if (link.is_rejoin && link.emp_db_id) {
-      prefillData = {
-        firstName: link.first_name, lastName: link.last_name,
-        fatherHusbandName: link.father_husband_name,
-        email: link.email, phone: link.phone, altPhone: link.alt_phone,
-        dob: link.date_of_birth ? link.date_of_birth.toISOString().split('T')[0] : '',
-        gender: link.gender, maritalStatus: link.marital_status,
-        educationalQualification: link.educational_qualification,
-        bloodGroup: link.blood_group, panNumber: link.pan_number,
-        nameOnPan: link.name_on_pan, aadhar: link.aadhar_number,
-        nameOnAadhar: link.name_on_aadhar,
-        department: link.department, position: link.position,
-        joiningDate: link.joining_date ? link.joining_date.toISOString().split('T')[0] : '',
-        employmentType: link.employment_type,
-        reportingManager: link.reporting_manager,
-        circle: link.circle, projectName: link.project_name,
-        bankName: link.bank_name, accountNumber: link.account_number,
-        ifscCode: link.ifsc_code, accountHolderName: link.account_holder_name,
-        bankBranch: link.bank_branch, oldEmployeeId: link.old_employee_id,
-      };
+    if (!linkRows[0]) {
+      return res.status(404).json({ success: false, message: 'Invalid registration link' });
     }
 
-    return res.json({
-      success: true, isRejoin: link.is_rejoin || false,
-      prefillData, linkEmail: link.employee_email,
+    const link = linkRows[0];
+
+    if (link.is_used) {
+      return res.status(410).json({ success: false, used: true, message: 'Link already used.' });
+    }
+    if (new Date(link.expires_at) < new Date()) {
+      return res.status(410).json({ success: false, expired: true, message: 'Link expired.' });
+    }
+
+    // Step 2: for rejoin links, fetch the FULL employee row separately
+    let prefillData = null;
+
+    if (link.is_rejoin && link.prefill_employee_id) {
+      const { rows: empRows } = await client.query(
+        `SELECT * FROM employees WHERE id = $1`,
+        [link.prefill_employee_id]
+      );
+
+      const emp = empRows[0];
+
+      if (emp) {
+        // ✅ All fields mapped from the full SELECT * row
+        // ✅ uan_number comes from emp.uan_number (snake_case DB column)
+        // ✅ mapped to uanNumber (camelCase) for the frontend form
+        prefillData = {
+          // ── Personal ────────────────────────────────────────
+          firstName:                emp.first_name,
+          lastName:                 emp.last_name,
+          fatherHusbandName:        emp.father_husband_name,
+          dob:                      emp.date_of_birth
+            ? new Date(emp.date_of_birth).toISOString().split('T')[0]
+            : '',
+          gender:                   emp.gender,
+          maritalStatus:            emp.marital_status,
+          educationalQualification: emp.educational_qualification,
+          bloodGroup:               emp.blood_group,
+          panNumber:                emp.pan_number,
+          nameOnPan:                emp.name_on_pan,
+          aadhar:                   emp.aadhar_number,
+          nameOnAadhar:             emp.name_on_aadhar,
+          uanNumber:                emp.uan_number || '',   // ✅ THE FIX
+
+          // ── Contact ─────────────────────────────────────────
+          email:                    emp.email,
+          phone:                    emp.phone,
+          altPhone:                 emp.alt_phone,
+
+          // ── Family ──────────────────────────────────────────
+          familyMemberName:         emp.family_member_name,
+          familyContactNo:          emp.family_contact_no,
+          familyWorkingStatus:      emp.family_working_status,
+          familyEmployerName:       emp.family_employer_name,
+          familyEmployerContact:    emp.family_employer_contact,
+
+          // ── Emergency contact ────────────────────────────────
+          emergencyContactName:     emp.emergency_contact_name,
+          emergencyContactNo:       emp.emergency_contact_no,
+          emergencyContactAddress:  emp.emergency_contact_address,
+          emergencyContactRelation: emp.emergency_contact_relation,
+
+          // ── Permanent address ────────────────────────────────
+          permanentAddress:         emp.permanent_address,
+          permanentPhone:           emp.permanent_phone,
+          permanentLandmark:        emp.permanent_landmark,
+          permanentLatLong:         emp.permanent_lat_long,
+
+          // ── Local address ────────────────────────────────────
+          localSameAsPermanent:     emp.local_same_as_permanent,
+          localAddress:             emp.local_address,
+          localPhone:               emp.local_phone,
+          localLandmark:            emp.local_landmark,
+          localLatLong:             emp.local_lat_long,
+
+          // ── References ──────────────────────────────────────
+          ref1Name:         emp.ref1_name,
+          ref1Designation:  emp.ref1_designation,
+          ref1Organization: emp.ref1_organization,
+          ref1Address:      emp.ref1_address,
+          ref1CityStatePin: emp.ref1_city_state_pin,
+          ref1ContactNo:    emp.ref1_contact_no,
+          ref1Email:        emp.ref1_email,
+
+          ref2Name:         emp.ref2_name,
+          ref2Designation:  emp.ref2_designation,
+          ref2Organization: emp.ref2_organization,
+          ref2Address:      emp.ref2_address,
+          ref2CityStatePin: emp.ref2_city_state_pin,
+          ref2ContactNo:    emp.ref2_contact_no,
+          ref2Email:        emp.ref2_email,
+
+          ref3Name:         emp.ref3_name,
+          ref3Designation:  emp.ref3_designation,
+          ref3Organization: emp.ref3_organization,
+          ref3Address:      emp.ref3_address,
+          ref3CityStatePin: emp.ref3_city_state_pin,
+          ref3ContactNo:    emp.ref3_contact_no,
+          ref3Email:        emp.ref3_email,
+
+          // ── Employment ──────────────────────────────────────
+          department:       emp.department,
+          position:         emp.position,
+          joiningDate:      emp.joining_date
+            ? new Date(emp.joining_date).toISOString().split('T')[0]
+            : '',
+          employmentType:   emp.employment_type,
+          reportingManager: emp.reporting_manager,
+          circle:           emp.circle,
+          projectName:      emp.project_name,
+
+          // ── Bank ────────────────────────────────────────────
+          bankName:          emp.bank_name,
+          accountNumber:     emp.account_number,
+          ifscCode:          emp.ifsc_code,
+          accountHolderName: emp.account_holder_name,
+          bankBranch:        emp.bank_branch,
+
+          // ── Meta ────────────────────────────────────────────
+          oldEmployeeId: emp.employee_id,
+        };
+      }
+    }
+    const sanitizeUan = (raw) => {
+  if (!raw) return null;
+  const clean = String(raw).replace(/\D/g, '').slice(0, 12);
+  return clean.length > 0 ? clean : null;
+};
+
+ return res.json({
+      success:     true,
+      valid:       true,          // ← ADD THIS
+      isRejoin:    link.is_rejoin || false,
+      prefillData,
+      linkEmail:   link.employee_email,
     });
+
   } catch (err) {
     console.error('❌ [GET /registrations/validate/:linkId]', err.message);
     return res.status(500).json({ success: false, message: err.message });

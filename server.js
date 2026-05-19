@@ -1,12 +1,14 @@
-// server.js  — unchanged from your existing file except:
-//   ✅ registrationRoutes now loads from the correct path
-//   ✅ approve/reject use POST (matching the updated registrationRoutes)
+// server.js
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import pool from './config/database.js';
+
+// ── Import UPLOADS_ROOT from the middleware so server.js and multer
+//    ALWAYS use the exact same folder path ─────────────────────────────────────
+import { UPLOADS_ROOT } from './middleware/Advancepayment.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,21 +33,31 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Serve uploaded files with CORS headers so frontend can load images/PDFs
+// ============================================================
+// STATIC FILE SERVING — uses the SAME root as multer
+// Serves: GET /uploads/advance-payment/2026-04/file.png
+// ============================================================
+console.log('🖼️  [server] express.static serving from:', UPLOADS_ROOT);
+
 app.use('/uploads', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   next();
-}, express.static(path.join(__dirname, 'uploads')));
+}, express.static(UPLOADS_ROOT, {
+  fallthrough: false, // return 404 instead of falling through to catch-all
+}));
 
-app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
-  if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.url.includes('/auth/')) {
-    const b = { ...req.body };
-    if (b.password) b.password = '[REDACTED]';
-    console.log('Body:', b);
+// Handle missing file cleanly
+app.use('/uploads', (err, req, res, _next) => {
+  if (err.status === 404 || err.statusCode === 404) {
+    return res.status(404).json({
+      success: false,
+      message: `File not found: ${req.originalUrl}`,
+      tip: 'Check that the file was uploaded successfully and the path is correct',
+      servedFrom: UPLOADS_ROOT,
+    });
   }
-  next();
+  res.status(500).json({ success: false, message: err.message });
 });
 
 // ============================================================
@@ -74,13 +86,24 @@ async function loadRoute(importPath, mountPath, label) {
 // ============================================================
 // ROUTES
 // ============================================================
+
+// ── Employee Management ───────────────────────────────────────────────────────
 await loadRoute('./routes/employeeMng/authRoutes.js',             '/api/auth',               'authRoutes');
 await loadRoute('./routes/employeeMng/employeeRoutes.js',         '/api/employees',          'employeeRoutes');
-// ⚠️  registration-links MUST be mounted BEFORE registrations
-// (Express would otherwise match /api/registration-links against /api/registrations)
 await loadRoute('./routes/employeeMng/registrationLinkRoutes.js', '/api/registration-links', 'registrationLinkRoutes');
 await loadRoute('./routes/employeeMng/registrationRoutes.js',     '/api/registrations',      'registrationRoutes');
 await loadRoute('./routes/adminRoutes.js',                        '/api/admin',              'adminRoutes');
+
+// ── Advance Payment ───────────────────────────────────────────────────────────
+await loadRoute('./routes/AdvancePayment/advancePaymentRoutes.js', '/api/advance-payment',   'advancePaymentRoutes');
+
+// ── Payroll ───────────────────────────────────────────────────────────────────
+await loadRoute('./routes/payroll/payrollRoutes.js',               '/api/payroll',           'payrollRoutes');
+
+// ── Reports ───────────────────────────────────────────────────────────────────
+await loadRoute('./routes/Reports/ReportRoute.js',                 '/api/reports',           'reportsRoutes');
+// ── Employee Doc Upload ───────────────────────────────────────────────────────
+await loadRoute('./routes/employeeMng/employeeDocUploadRoutes.js', '/api/employee-docs', 'employeeDocUploadRoutes');
 
 // ============================================================
 // DIAGNOSTIC ENDPOINTS
@@ -111,15 +134,7 @@ app.get('/api/health', async (_req, res) => {
     database: dbOk ? 'connected' : 'FAILED',
     dbError: dbErr,
     startupErrors: startupErrors.length,
-    routes: {
-      auth:           '/api/auth',
-      employees:      '/api/employees',
-      exportData:     '/api/employees/export/data',
-      exportTemplate: '/api/employees/export/template',
-      registrations:  '/api/registrations',
-      links:          '/api/registration-links',
-      admin:          '/api/admin'
-    }
+    uploadsDir: UPLOADS_ROOT,
   });
 });
 
@@ -131,7 +146,13 @@ app.get('/api/debug', async (_req, res) => {
     const { rows } = await pool.query(`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public'
-      AND table_name IN ('employees','employee_documents','admin_users','registration_links')
+      AND table_name IN (
+        'employees','employee_documents','admin_users','registration_links',
+        'advance_payment_types','advance_payment_requests',
+        'advance_payment_attachments','advance_payment_links',
+        'advance_payment_history','advance_payment_deductions',
+        'payroll_records','payroll_advance_effects'
+      )
       ORDER BY table_name
     `);
     dbTables = rows.map(r => r.table_name);
@@ -139,7 +160,6 @@ app.get('/api/debug', async (_req, res) => {
     dbErr = e.message;
   }
 
-  // Check new columns exist
   let newColumnsOk = false, missingCols = [];
   try {
     const { rows: cols } = await pool.query(`
@@ -159,8 +179,14 @@ app.get('/api/debug', async (_req, res) => {
     newColumnsOk = missingCols.length === 0;
   } catch (_) {}
 
-  const requiredTables = ['admin_users', 'employee_documents', 'employees', 'registration_links'];
-  const missingTables  = requiredTables.filter(t => !dbTables.includes(t));
+  const requiredTables = [
+    'admin_users','employee_documents','employees','registration_links',
+    'advance_payment_types','advance_payment_requests',
+    'advance_payment_attachments','advance_payment_links',
+    'advance_payment_history','advance_payment_deductions',
+    'payroll_records','payroll_advance_effects',
+  ];
+  const missingTables = requiredTables.filter(t => !dbTables.includes(t));
 
   const pkgChecks = {};
   for (const pkg of ['multer', 'pg', 'express', 'cors', 'dotenv', 'uuid', 'exceljs']) {
@@ -176,19 +202,7 @@ app.get('/api/debug', async (_req, res) => {
 
   res.status(allOk ? 200 : 503).json({
     overall: allOk ? '✅ All systems OK' : '❌ Problems found — fix items below',
-    routeMountPoints: {
-      'POST /api/auth/login':                        'authRoutes',
-      'GET  /api/employees':                         'employeeRoutes',
-      'GET  /api/employees/export/data':             'employeeRoutes — export (all fields)',
-      'GET  /api/employees/export/template':         'employeeRoutes — import template',
-      'GET  /api/employees/pending-count':           'employeeRoutes — badge count',
-      'POST /api/registration-links':                'linkRoutes — generate link',
-      'GET  /api/registration-links/:id/validate':   'linkRoutes — validate link',
-      'POST /api/registrations':                     'registrationRoutes — submit form',
-      'GET  /api/registrations/pending':             'registrationRoutes — admin pending list',
-      'POST /api/registrations/:id/approve':         'registrationRoutes — approve',
-      'POST /api/registrations/:id/reject':          'registrationRoutes — reject'
-    },
+    uploadsDirectory: UPLOADS_ROOT,
     routeStartupErrors: startupErrors.length === 0
       ? '✅ All routes loaded OK'
       : startupErrors.map(e => ({ mountPath: e.route, '❌ error': e.error })),
@@ -198,11 +212,6 @@ app.get('/api/debug', async (_req, res) => {
       tablesFound:   dbTables,
       tablesMissing: missingTables.length ? missingTables : '✅ none',
       newColumns:    newColumnsOk ? '✅ all present' : `❌ missing: ${missingCols.join(', ')}`,
-      fix: missingTables.length
-        ? `Run schema.sql: psql -U postgres -d ${process.env.DB_NAME || 'employee_db'} -f schema.sql`
-        : missingCols.length
-          ? 'Run the MIGRATION section at the bottom of schema.sql'
-          : null
     },
     packages: pkgChecks,
     environment: {
@@ -220,7 +229,7 @@ app.get('/api/debug', async (_req, res) => {
       : [
           !dbOk                && `Fix DB: ${dbErr}`,
           missingEnv.length    && `Add to .env: ${missingEnv.join(', ')}`,
-          missingTables.length && `Run schema.sql — missing tables: ${missingTables.join(', ')}`,
+          missingTables.length && `Run schema files — missing tables: ${missingTables.join(', ')}`,
           missingCols.length   && `Run MIGRATION in schema.sql — missing columns: ${missingCols.join(', ')}`,
           startupErrors.length && `Fix route errors: ${startupErrors.map(e => e.route).join(', ')}`
         ].filter(Boolean)
@@ -272,15 +281,11 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('='.repeat(60));
   console.log('🚀 Employee Management System API');
   console.log('='.repeat(60));
-  console.log(`✅ Server:        http://localhost:${PORT}`);
-  console.log(`🔍 Debug:         http://localhost:${PORT}/api/debug`);
-  console.log(`🏥 Health:        http://localhost:${PORT}/api/health`);
-  console.log(`🔗 Generate link: POST /api/registration-links`);
-  console.log(`📋 Submit form:   POST /api/registrations`);
-  console.log(`⏳ Pending:       GET  /api/registrations/pending`);
-  console.log(`👥 Employees:     GET  /api/employees`);
-  console.log(`📤 Export data:   GET  /api/employees/export/data`);
-  console.log(`📄 Template:      GET  /api/employees/export/template`);
+  console.log(`✅ Server:    http://localhost:${PORT}`);
+  console.log(`🔍 Debug:     http://localhost:${PORT}/api/debug`);
+  console.log(`🏥 Health:    http://localhost:${PORT}/api/health`);
+  console.log(`🖼️  Uploads:   http://localhost:${PORT}/uploads/...`);
+  console.log(`📁 From disk: ${UPLOADS_ROOT}`);
   if (startupErrors.length > 0) {
     console.log('');
     console.log('⚠️  STARTUP PROBLEMS:');

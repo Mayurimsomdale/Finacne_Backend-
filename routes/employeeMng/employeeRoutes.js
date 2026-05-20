@@ -88,33 +88,35 @@
     // ══════════════════════════════════════════════════════════════════════════════
     // generateEmployeeId — Format: Insta-YYMMNNN+
     // ══════════════════════════════════════════════════════════════════════════════
-    async function generateEmployeeId(client) {
-      const now = new Date();
-      const yy  = String(now.getFullYear()).slice(-2);
-      const mm  = String(now.getMonth() + 1).padStart(2, '0');
-      const prefix = `Insta-${yy}${mm}`;
+  // ══════════════════════════════════════════════════════════════════════════════
+// generateEmployeeId — Format: Insta-YYMMxxxx  (e.g. Insta-26050001)
+// 4-digit zero-padded sequence, resets per month, starts at 0001
+// ══════════════════════════════════════════════════════════════════════════════
+async function generateEmployeeId(client) {
+  const now    = new Date();
+  const yy     = String(now.getFullYear()).slice(-2);
+  const mm     = String(now.getMonth() + 1).padStart(2, '0');
+  const prefix = `Insta-${yy}${mm}`;
 
-      const { rows } = await client.query(`
-        SELECT employee_id
-        FROM employees
-        WHERE employee_id ~ '^Insta-[0-9]{8,}$'
-        ORDER BY
-          CAST(REGEXP_REPLACE(employee_id, '[^0-9]', '', 'g') AS BIGINT) DESC
-        LIMIT 1
-      `);
+  const { rows } = await client.query(`
+    SELECT employee_id
+    FROM employees
+    WHERE employee_id LIKE $1
+    ORDER BY
+      CAST(REGEXP_REPLACE(employee_id, '[^0-9]', '', 'g') AS BIGINT) DESC
+    LIMIT 1
+  `, [`${prefix}%`]);
 
-      let nextSeq = 1001;
-      if (rows[0]) {
-        const lastId      = rows[0].employee_id;
-        const withoutTag  = lastId.replace(/^Insta-/, '');
-        const seqStr      = withoutTag.slice(4);
-        const lastSeq     = parseInt(seqStr, 10);
-        if (!isNaN(lastSeq)) nextSeq = lastSeq + 1;
-      }
+  let nextSeq = 1;
+  if (rows[0]) {
+    const lastId  = rows[0].employee_id;
+    const seqStr  = lastId.slice(prefix.length); // digits after "Insta-YYMM"
+    const lastSeq = parseInt(seqStr, 10);
+    if (!isNaN(lastSeq)) nextSeq = lastSeq + 1;
+  }
 
-      return `${prefix}${nextSeq}`;
-    }
-
+  return `${prefix}${String(nextSeq).padStart(4, '0')}`;
+}
     // ── GET /api/employees/next-id ────────────────────────────────────────────────
     router.get('/next-id', async (req, res) => {
       const client = await pool.connect();

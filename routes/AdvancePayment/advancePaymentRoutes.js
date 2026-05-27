@@ -52,8 +52,8 @@ router.get('/resubmit/:token', validateResubmitToken);
 // ── Requests ──────────────────────────────────────────────────────────────────
 // IMPORTANT: /requests/public must be defined BEFORE /requests/:id
 router.get  ('/requests',                 verifyToken,      listRequests);
-router.post ('/requests/public',          uploadMiddleware,  createPublicRequest);  // no auth — handles both link & resubmit tokens
-router.post ('/requests',                 uploadMiddleware,  createRequest);        // admin panel
+router.post ('/requests/public',          uploadMiddleware,  createPublicRequest);  
+router.post ('/requests',                 uploadMiddleware,  createRequest);        
 router.get  ('/requests/:id',             verifyToken,       getRequest);
 router.post ('/requests/:id/approve',     verifyToken,       approveRequest);
 router.post ('/requests/:id/reject',      verifyToken,       rejectRequest);

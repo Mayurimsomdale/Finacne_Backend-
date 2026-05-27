@@ -88,7 +88,7 @@ async function loadRoute(importPath, mountPath, label) {
 // ============================================================
 
 // ── Employee Management ───────────────────────────────────────────────────────
-await loadRoute('./routes/employeeMng/authRoutes.js',             '/api/auth',               'authRoutes');
+await loadRoute('./routes/authRoutes.js',             '/api/auth',               'authRoutes');
 await loadRoute('./routes/employeeMng/employeeRoutes.js',         '/api/employees',          'employeeRoutes');
 await loadRoute('./routes/employeeMng/registrationLinkRoutes.js', '/api/registration-links', 'registrationLinkRoutes');
 await loadRoute('./routes/employeeMng/registrationRoutes.js',     '/api/registrations',      'registrationRoutes');
@@ -217,15 +217,15 @@ app.get('/api/debug', async (_req, res) => {
     environment: {
       NODE_ENV:    process.env.NODE_ENV    || '(not set)',
       PORT:        process.env.PORT        || '5000 (default)',
-      DB_HOST:     process.env.DB_HOST     || '❌ MISSING',
-      DB_PORT:     process.env.DB_PORT     || '❌ MISSING',
-      DB_NAME:     process.env.DB_NAME     || '❌ MISSING',
-      DB_USER:     process.env.DB_USER     || '❌ MISSING',
-      DB_PASSWORD: process.env.DB_PASSWORD ? '✅ set' : '❌ MISSING',
-      missing:     missingEnv.length ? missingEnv : '✅ all set'
+      DB_HOST:     process.env.DB_HOST     || ' MISSING',
+      DB_PORT:     process.env.DB_PORT     || ' MISSING',
+      DB_NAME:     process.env.DB_NAME     || ' MISSING',
+      DB_USER:     process.env.DB_USER     || ' MISSING',
+      DB_PASSWORD: process.env.DB_PASSWORD ? ' set' : ' MISSING',
+      missing:     missingEnv.length ? missingEnv : ' all set'
     },
     actionItems: allOk
-      ? ['🎉 Nothing to fix!']
+      ? [' Nothing to fix!']
       : [
           !dbOk                && `Fix DB: ${dbErr}`,
           missingEnv.length    && `Add to .env: ${missingEnv.join(', ')}`,
@@ -244,7 +244,7 @@ app.use((err, _req, res, _next) => {
     return res.status(400).json({ success: false, message: 'File size must be less than 5MB' });
   if (err.code === 'LIMIT_UNEXPECTED_FILE')
     return res.status(400).json({ success: false, message: `Unexpected file field: ${err.field}` });
-  console.error('🔴 Express error:', err.message);
+  console.error(' Express error:', err.message);
   res.status(err.status || 500).json({
     success: false,
     message: err.message || 'Internal server error',
@@ -265,38 +265,38 @@ app.use('*', (req, res) => {
 // ============================================================
 pool.query('SELECT NOW() as t', (err, result) => {
   if (err) {
-    console.error('❌ Database connection FAILED:', err.message);
+    console.error(' Database connection FAILED:', err.message);
     startupErrors.push({ route: 'database', error: err.message });
   } else {
-    console.log('✅ Database connected at', result.rows[0].t);
+    console.log(' Database connected at', result.rows[0].t);
   }
 });
 
-pool.on('error', err => console.error('❌ DB pool error:', err.message));
+pool.on('error', err => console.error(' DB pool error:', err.message));
 
 // ============================================================
 // START SERVER
 // ============================================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log('='.repeat(60));
-  console.log('🚀 Employee Management System API');
+  console.log(' Employee Management System API');
   console.log('='.repeat(60));
-  console.log(`✅ Server:    http://localhost:${PORT}`);
-  console.log(`🔍 Debug:     http://localhost:${PORT}/api/debug`);
-  console.log(`🏥 Health:    http://localhost:${PORT}/api/health`);
-  console.log(`🖼️  Uploads:   http://localhost:${PORT}/uploads/...`);
-  console.log(`📁 From disk: ${UPLOADS_ROOT}`);
+  console.log(` Server:    http://localhost:${PORT}`);
+  console.log(` Debug:     http://localhost:${PORT}/api/debug`);
+  console.log(` Health:    http://localhost:${PORT}/api/health`);
+  console.log(`  Uploads:   http://localhost:${PORT}/uploads/...`);
+  console.log(` From disk: ${UPLOADS_ROOT}`);
   if (startupErrors.length > 0) {
     console.log('');
-    console.log('⚠️  STARTUP PROBLEMS:');
-    startupErrors.forEach(e => console.error(`  ❌ ${e.route}: ${e.error}`));
+    console.log('  STARTUP PROBLEMS:');
+    startupErrors.forEach(e => console.error(`   ${e.route}: ${e.error}`));
   }
   console.log('='.repeat(60));
 });
 
 process.on('SIGTERM', () => pool.end(() => process.exit(0)));
-process.on('SIGINT',  () => { console.log('\n👋 Shutting down'); pool.end(() => process.exit(0)); });
-process.on('uncaughtException',  err => console.error('🔴 Uncaught:', err.message));
-process.on('unhandledRejection', reason => console.error('🔴 Unhandled:', reason instanceof Error ? reason.message : reason));
+process.on('SIGINT',  () => { console.log('\n Shutting down'); pool.end(() => process.exit(0)); });
+process.on('uncaughtException',  err => console.error(' Uncaught:', err.message));
+process.on('unhandledRejection', reason => console.error(' Unhandled:', reason instanceof Error ? reason.message : reason));
 
 export default app;

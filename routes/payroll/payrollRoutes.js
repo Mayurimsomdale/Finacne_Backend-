@@ -19,7 +19,7 @@
     initMonth,
     getPayrollStats,
     getAdvanceSummary,
-  } from '../../controllers/Payroll/payrollController.js';
+  } from '../../controllers/payroll/payrollController.js';
 
   const router = Router();
 

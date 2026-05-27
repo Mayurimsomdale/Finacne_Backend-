@@ -9,7 +9,7 @@ import {
   getYearlyReport,
   getDepartmentReport,
   getYearSummary,
-} from '../../controllers/Reports/reportsController.js';
+} from '../../controllers/reports/reportsController.js';
 
 const router = Router();
 

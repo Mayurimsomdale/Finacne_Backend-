@@ -1571,3 +1571,5 @@ export async function sendRejoinDeclinedEmail({
       textBody: `KYE Document Rejected\n\nDear ${firstName},\n\nReason: ${reason || 'Please review and re-submit.'}\nReviewed: ${rejectedAt}\n\nContact HR at ${HR_EMAIL} to arrange re-submission.\n\nInsta ICT Solutions — HR Department`,
     });
   }
+
+  

@@ -4,54 +4,75 @@ import pool from '../config/database.js';
 
 export const authenticateAdmin = async (req, res, next) => {
   try {
-    // Get token from header
-    const token = req.headers.authorization?.split(' ')[1];
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: 'No token provided, authorization denied'
-      });
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ success: false, message: 'No token provided' });
     }
 
-    // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const token = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : authHeader.trim();
 
-    // Get admin from database
-    const result = await pool.query(
-      'SELECT id, username, email, role, full_name FROM admin_users WHERE id = $1 AND is_active = true',
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'Empty token' });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (jwtErr) {
+      const message = jwtErr.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token';
+      return res.status(401).json({ success: false, message });
+    }
+
+    // ✅ 'admins' table — matches authRoutes.js login
+    const { rows } = await pool.query(
+      'SELECT id, username, email, full_name, role, is_active FROM admins WHERE id = $1',
       [decoded.id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'User not found or inactive'
-      });
+    if (rows.length === 0) {
+      return res.status(401).json({ success: false, message: 'User not found' });
     }
 
-    req.admin = result.rows[0];
+    if (rows[0].is_active === false) {
+      return res.status(403).json({ success: false, message: 'Account is deactivated' });
+    }
+
+    // Set both so every controller works regardless of which it reads
+    req.admin = {
+      id:       rows[0].id,
+      name:     rows[0].full_name || rows[0].username,
+      username: rows[0].username,
+      email:    rows[0].email,
+      role:     rows[0].role,
+    };
+    req.user = {
+      id:       rows[0].id,
+      username: rows[0].username,
+      role:     rows[0].role,
+    };
+
     next();
   } catch (error) {
     console.error('Auth middleware error:', error);
-    
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token'
-      });
-    }
-    
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Token expired'
-      });
-    }
+    return res.status(500).json({ success: false, message: 'Server error during authentication' });
+  }
+};
 
-    res.status(500).json({
+// Aliases — every import across the codebase works
+export const authenticate  = authenticateAdmin;
+export const verifyToken   = authenticateAdmin;
+
+export const authorize = (...roles) => (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ success: false, message: 'Not authenticated' });
+  }
+  if (!roles.includes(req.user.role)) {
+    return res.status(403).json({
       success: false,
-      message: 'Server error during authentication'
+      message: `Role '${req.user.role}' not authorized. Required: ${roles.join(', ')}`,
     });
   }
+  next();
 };

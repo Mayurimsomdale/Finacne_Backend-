@@ -25,44 +25,68 @@ const PORT = process.env.PORT || 5000;
 const startupErrors = [];
 
 // ============================================================
+// CORS CONFIGURATION (Consolidated Whitelist)
+// ============================================================
+const allowedOrigins = [
+  process.env.FRONTEND_URL, // from .env  e.g. https://finance.instagrp.com
+  "http://localhost:3000", // local dev
+  "http://localhost:5173", // vite dev
+].filter(Boolean); // removes undefined if env var missing
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, server-to-server)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200,
+};
+
+// ============================================================
 // MIDDLEWARE
 // ============================================================
-app.use(
-  cors({
-    origin: true,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-);
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ extended: true, limit: "100mb" }));
 
 // ============================================================
 // STATIC FILE SERVING — uses the SAME root as multer
-// Serves: GET /uploads/advance-payment/2026-04/file.png
 // ============================================================
 console.log("🖼️  [server] express.static serving from:", UPLOADS_ROOT);
 
-// ── FIX: uploadsCorsMw must come BEFORE express.static so every /uploads
-//    response includes the CORS headers the PDF image-fetch needs.
-//    Set FRONTEND_URL in your .env (e.g. http://localhost:3000)
 app.use("/uploads", uploadsCorsMw);
 
 app.use(
   "/uploads",
   (req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+    }
     res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
     next();
   },
   express.static(UPLOADS_ROOT, {
-    fallthrough: false, // return 404 instead of falling through to catch-all
+    fallthrough: false,
   }),
 );
 
-// Handle missing file cleanly
 app.use("/uploads", (err, req, res, _next) => {
   if (err.status === 404 || err.statusCode === 404) {
     return res.status(404).json({
@@ -146,6 +170,7 @@ await loadRoute(
   "/api/reports",
   "reportsRoutes",
 );
+
 // ── Employee Doc Upload ───────────────────────────────────────────────────────
 await loadRoute(
   "./routes/employeeMng/employeeDocUploadRoutes.js",
@@ -317,15 +342,18 @@ app.get("/api/debug", async (_req, res) => {
     environment: {
       NODE_ENV: process.env.NODE_ENV || "(not set)",
       PORT: process.env.PORT || "5000 (default)",
-      DB_HOST: process.env.DB_HOST || " MISSING",
-      DB_PORT: process.env.DB_PORT || " MISSING",
-      DB_NAME: process.env.DB_NAME || " MISSING",
-      DB_USER: process.env.DB_USER || " MISSING",
-      DB_PASSWORD: process.env.DB_PASSWORD ? " set" : " MISSING",
-      missing: missingEnv.length ? missingEnv : " all set",
+      FRONTEND_URL:
+        process.env.FRONTEND_URL ||
+        "⚠️  MISSING — CORS will block production requests",
+      DB_HOST: process.env.DB_HOST || "⚠️  MISSING",
+      DB_PORT: process.env.DB_PORT || "⚠️  MISSING",
+      DB_NAME: process.env.DB_NAME || "⚠️  MISSING",
+      DB_USER: process.env.DB_USER || "⚠️  MISSING",
+      DB_PASSWORD: process.env.DB_PASSWORD ? "✅ set" : "⚠️  MISSING",
+      missing: missingEnv.length ? missingEnv : "✅ all set",
     },
     actionItems: allOk
-      ? [" Nothing to fix!"]
+      ? ["✅ Nothing to fix!"]
       : [
           !dbOk && `Fix DB: ${dbErr}`,
           missingEnv.length && `Add to .env: ${missingEnv.join(", ")}`,
@@ -351,7 +379,7 @@ app.use((err, _req, res, _next) => {
     return res
       .status(400)
       .json({ success: false, message: `Unexpected file field: ${err.field}` });
-  console.error(" Express error:", err.message);
+  console.error("❌ Express error:", err.message);
   res.status(err.status || 500).json({
     success: false,
     message: err.message || "Internal server error",
@@ -368,34 +396,49 @@ app.use("*", (req, res) => {
 });
 
 // ============================================================
-// DB CONNECTION CHECK
+// DB CONNECTION CHECK + KEEP-ALIVE (prevents Neon cold-start 504s)
 // ============================================================
 pool.query("SELECT NOW() as t", (err, result) => {
   if (err) {
-    console.error(" Database connection FAILED:", err.message);
+    console.error("❌ Database connection FAILED:", err.message);
     startupErrors.push({ route: "database", error: err.message });
   } else {
-    console.log(" Database connected at", result.rows[0].t);
+    console.log("✅ Database connected at", result.rows[0].t);
   }
 });
 
-pool.on("error", (err) => console.error(" DB pool error:", err.message));
+pool.on("error", (err) => console.error("❌ DB pool error:", err.message));
+
+// ── Keep Neon warm — ping every 4 minutes ────────────────────────────────────
+// Neon suspends after 5 min of inactivity; this prevents cold-start 504s.
+// Safe to leave in production — a lightweight "SELECT 1" every 4 min.
+const KEEP_ALIVE_INTERVAL_MS = 4 * 60 * 1000; // 4 minutes
+
+setInterval(async () => {
+  try {
+    await pool.query("SELECT 1");
+    console.log("💓 DB keep-alive OK");
+  } catch (err) {
+    console.error("💔 DB keep-alive failed:", err.message);
+  }
+}, KEEP_ALIVE_INTERVAL_MS);
 
 // ============================================================
 // START SERVER
 // ============================================================
 app.listen(PORT, "0.0.0.0", () => {
   console.log("=".repeat(60));
-  console.log(" Employee Management System API");
+  console.log("🚀 Employee Management System API");
   console.log("=".repeat(60));
-  console.log(` Server:    http://localhost:${PORT}`);
-  console.log(` Debug:     http://localhost:${PORT}/api/debug`);
-  console.log(` Health:    http://localhost:${PORT}/api/health`);
-  console.log(`  Uploads:   http://localhost:${PORT}/uploads/...`);
-  console.log(` From disk: ${UPLOADS_ROOT}`);
+  console.log(`   Server:    http://localhost:${PORT}`);
+  console.log(`   Debug:     http://localhost:${PORT}/api/debug`);
+  console.log(`   Health:    http://localhost:${PORT}/api/health`);
+  console.log(`   Uploads:   http://localhost:${PORT}/uploads/...`);
+  console.log(`   From disk: ${UPLOADS_ROOT}`);
+  console.log(`   CORS:      ${allowedOrigins.join(", ")}`);
   if (startupErrors.length > 0) {
     console.log("");
-    console.log("  STARTUP PROBLEMS:");
+    console.log("⚠️  STARTUP PROBLEMS:");
     startupErrors.forEach((e) => console.error(`   ${e.route}: ${e.error}`));
   }
   console.log("=".repeat(60));
@@ -403,15 +446,15 @@ app.listen(PORT, "0.0.0.0", () => {
 
 process.on("SIGTERM", () => pool.end(() => process.exit(0)));
 process.on("SIGINT", () => {
-  console.log("\n Shutting down");
+  console.log("\n🛑 Shutting down");
   pool.end(() => process.exit(0));
 });
 process.on("uncaughtException", (err) =>
-  console.error(" Uncaught:", err.message),
+  console.error("❌ Uncaught:", err.message),
 );
 process.on("unhandledRejection", (reason) =>
   console.error(
-    " Unhandled:",
+    "❌ Unhandled:",
     reason instanceof Error ? reason.message : reason,
   ),
 );

@@ -1,8 +1,4 @@
-// controllers/registration.controller.js
-// ─────────────────────────────────────────────────────────────────────────────
-// All registration form business logic. Middleware handles uploads, link
-// resolution, and Aadhaar uniqueness before any of these run.
-// ─────────────────────────────────────────────────────────────────────────────
+import { getS3Url, uploadFileToS3 } from "../../utills/s3.js";
 
 import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
@@ -24,6 +20,7 @@ const str = (v) =>
   v !== undefined && v !== null && String(v).trim() !== ""
     ? String(v).trim()
     : null;
+
 const dateStr = (v) => {
   const s = str(v);
   if (!s) return null;
@@ -31,6 +28,7 @@ const dateStr = (v) => {
   const d = new Date(s);
   return !isNaN(d.getTime()) ? d.toISOString().split("T")[0] : null;
 };
+
 const bool = (v) => v === true || v === "true" || v === "1";
 const strUan = (v) => {
   const s = str(v);
@@ -39,43 +37,180 @@ const strUan = (v) => {
   return digits || null;
 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── S3 upload helpers ───────────────────────────────────────────────────────
+
+const S3_FOLDER = "uploads/employee_docs";
 
 /**
- * Extract a safe placeholder string from an uploaded file.
- * With memoryStorage, files have .originalname but no .key/.location.
- * ALWAYS returns a string (never null/undefined) so NOT NULL DB columns
- * are satisfied. Pass required=true to guard that the field must exist.
+ * uploadedKeys — tracks S3 keys uploaded in a single request so we can
+ * roll them back if the DB transaction fails.
  */
+
+/**
+ * uploadFieldToS3 — uploads a single multer file (from req.files[fieldName][0])
+ * to S3 and returns the S3 key, or null if the field was not submitted.
+ */
+async function uploadFieldToS3(files, fieldName) {
+  const file = files?.[fieldName]?.[0];
+  if (!file) return null;
+  const { key } = await uploadFileToS3(file, S3_FOLDER);
+  return key;
+}
+
+/**
+ * uploadAllFilesToS3 — uploads every submitted file to S3 in parallel.
+ * Returns an object mapping the same keys as getUrls() to S3 keys (or null).
+ *
+ * @param {object} files  — req.files from multer
+ * @returns {{ idPhotoUrl, aadharCardUrl, panCardUrl, resumeUrl,
+ *             bankPassbookUrl, paySlipUrl, otherCertsUrl,
+ *             medCertUrl, acadUrl, farmToCliUrl,
+ *             uploadedKeys: string[] }}
+ */
+async function uploadAllFilesToS3(files) {
+  const [
+    idPhotoUrl,
+    aadharCardUrl,
+    panCardUrl,
+    resumeUrl,
+    bankPassbookUrl,
+    paySlipUrl,
+    otherCertsUrl,
+    medCertUrl,
+    acadUrl,
+    farmToCliUrl,
+  ] = await Promise.all([
+    uploadFieldToS3(files, "idPhoto"),
+    uploadFieldToS3(files, "aadharCard"),
+    uploadFieldToS3(files, "panCard"),
+    uploadFieldToS3(files, "resume"),
+    uploadFieldToS3(files, "bankPassbook"),
+    uploadFieldToS3(files, "payslip"),
+    uploadFieldToS3(files, "otherCertificates"),
+    uploadFieldToS3(files, "medicalCertificate"),
+    uploadFieldToS3(files, "academicRecords"),
+    uploadFieldToS3(files, "farmToCli"),
+  ]);
+
+  const uploadedKeys = [
+    idPhotoUrl,
+    aadharCardUrl,
+    panCardUrl,
+    resumeUrl,
+    bankPassbookUrl,
+    paySlipUrl,
+    otherCertsUrl,
+    medCertUrl,
+    acadUrl,
+    farmToCliUrl,
+  ].filter(Boolean);
+
+  return {
+    idPhotoUrl,
+    aadharCardUrl,
+    panCardUrl,
+    resumeUrl,
+    bankPassbookUrl,
+    paySlipUrl,
+    otherCertsUrl,
+    medCertUrl,
+    acadUrl,
+    farmToCliUrl,
+    uploadedKeys,
+  };
+}
+
+// Keep these for saveDocument() which still reads file.key from the enriched file object
 function fileUrl(files, ...fieldNames) {
   for (const name of fieldNames) {
     const f = files?.[name]?.[0];
     if (f) {
-      return f.key ?? f.location ?? f.originalname ?? "pending";
+      return f.key ?? f.location ?? f.originalname ?? null;
     }
   }
   return null;
 }
 
-/**
- * Same as fileUrl but ALWAYS returns a string — never null.
- * Use for NOT NULL columns in the new-employee INSERT path.
- */
 function fileUrlRequired(files, ...fieldNames) {
   return fileUrl(files, ...fieldNames) ?? "";
 }
 
-async function saveDocument(client, empDbId, type, file) {
+// ─── Normalize multer field name → canonical document_type ───────────────────
+// Ensures the photo always lands as document_type='photo' regardless of
+// whether the form field was named 'idPhoto', 'id_photo', or 'photo'.
+const FIELD_TO_DOC_TYPE = {
+  idPhoto: "photo",
+  id_photo: "photo",
+  photo: "photo",
+  aadharCard: "aadhar_card",
+  panCard: "pan_card",
+  bankPassbook: "bank_passbook",
+  resume: "resume",
+  payslip: "payslip",
+  otherCertificates: "other_certificates",
+  medicalCertificate: "medical_certificate",
+  academicRecords: "academic_records",
+  farmToCli: "farm_to_cli",
+};
+
+// ─── Save a single document row ──────────────────────────────────────────────
+async function saveDocument(client, empDbId, docType, file) {
   if (!file) return;
+  // Normalize the document_type so photos always use 'photo' not 'idPhoto'
+  const normalizedType = FIELD_TO_DOC_TYPE[docType] || docType;
   const filePath = file.key ?? file.location ?? file.originalname ?? "pending";
   await client.query(
     `INSERT INTO employee_documents
        (employee_id, document_type, file_path, file_name, file_size, mime_type)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
-    [empDbId, type, filePath, file.originalname, file.size, file.mimetype],
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      empDbId,
+      normalizedType,
+      filePath,
+      file.originalname,
+      file.size,
+      file.mimetype,
+    ],
   );
 }
 
+// ─── Replace all documents for an employee ──────────────────────────────────
+async function replaceDocuments(client, empDbId, files) {
+  if (!files || Object.keys(files).length === 0) return;
+  // Delete old docs — use normalised types so we don't leave stale 'idPhoto' rows
+  const types = Object.keys(files).map((f) => FIELD_TO_DOC_TYPE[f] || f);
+  if (types.length > 0) {
+    await client.query(
+      `DELETE FROM employee_documents WHERE employee_id = $1 AND document_type = ANY($2::text[])`,
+      [empDbId, types],
+    );
+    // Also delete legacy variant names for photos to avoid duplicates
+    await client.query(
+      `DELETE FROM employee_documents WHERE employee_id = $1 AND document_type IN ('idPhoto','id_photo','photo')`,
+      [empDbId],
+    );
+  }
+  await Promise.all(
+    Object.entries(files).map(([fieldName, arr]) =>
+      saveDocument(client, empDbId, fieldName, arr?.[0]),
+    ),
+  );
+
+  // FIX: If a new photo was uploaded, sync the id_photo_url column so it always
+  // reflects the latest photo key — this ensures both resolveDocUrls() and
+  // the EMP_SELECT Source-2 fallback always have a valid reference.
+  const photoFile =
+    files.idPhoto?.[0] ?? files.id_photo?.[0] ?? files.photo?.[0];
+  const photoKey = photoFile?.key ?? null;
+  if (photoKey) {
+    await client.query(
+      `UPDATE employees SET id_photo_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [photoKey, empDbId],
+    );
+  }
+}
+
+// ─── Generate next employee ID ───────────────────────────────────────────────
 async function generateEmployeeId(client) {
   const now = new Date();
   const yy = String(now.getFullYear()).slice(-2);
@@ -96,88 +231,88 @@ async function generateEmployeeId(client) {
     const lastSeq = parseInt(seqStr, 10);
     if (!isNaN(lastSeq)) nextSeq = lastSeq + 1;
   }
-
   return `${prefix}${String(nextSeq).padStart(4, "0")}`;
 }
 
-// Build the shared parameter array used by all three SQL paths.
-// Length = 67. SQL placeholders $1…$67; the caller appends empId as $68.
+// ─── buildCommonFields ───────────────────────────────────────────────────────
+// Returns array of 67 values mapping to DB columns $1–$67.
+// Used for both INSERT and UPDATE SQL.
 function buildCommonFields(d) {
   const local = (field, fallback) =>
     bool(d.localSameAsPermanent) ? str(d[fallback]) : str(d[field]);
 
   return [
-    str(d.firstName),
-    str(d.fatherHusbandName),
-    str(d.lastName), // 1-3
-    str(d.email)?.toLowerCase(), // 4
-    str(d.phone),
-    str(d.altPhone), // 5-6
-    dateStr(d.dob),
-    str(d.gender),
-    str(d.maritalStatus), // 7-9
-    str(d.educationalQualification),
-    str(d.bloodGroup), // 10-11
-    str(d.panNumber)?.toUpperCase() || null,
-    str(d.nameOnPan), // 12-13
-    str(d.aadhar)?.replace(/\s/g, "") || null,
-    str(d.nameOnAadhar), // 14-15
-    strUan(d.uanNumber), // 16
-    str(d.familyMemberName),
-    str(d.familyContactNo),
-    str(d.familyWorkingStatus), // 17-19
-    str(d.familyEmployerName),
-    str(d.familyEmployerContact), // 20-21
-    str(d.emergencyContactName),
-    str(d.emergencyContactNo), // 22-23
-    str(d.emergencyContactAddress),
-    str(d.emergencyContactRelation), // 24-25
-    str(d.permanentAddress),
-    str(d.permanentPhone), // 26-27
-    str(d.permanentLandmark),
-    str(d.permanentLatLong), // 28-29
-    bool(d.localSameAsPermanent), // 30
-    local("localAddress", "permanentAddress"), // 31
-    local("localPhone", "permanentPhone"), // 32
-    local("localLandmark", "permanentLandmark"), // 33
-    local("localLatLong", "permanentLatLong"), // 34
-    str(d.ref1Name),
-    str(d.ref1Designation),
-    str(d.ref1Organization), // 35-37
-    str(d.ref1Address),
-    str(d.ref1CityStatePin), // 38-39
-    str(d.ref1ContactNo),
-    str(d.ref1Email), // 40-41
-    str(d.ref2Name),
-    str(d.ref2Designation),
-    str(d.ref2Organization), // 42-44
-    str(d.ref2Address),
-    str(d.ref2CityStatePin), // 45-46
-    str(d.ref2ContactNo),
-    str(d.ref2Email), // 47-48
-    str(d.ref3Name),
-    str(d.ref3Designation),
-    str(d.ref3Organization), // 49-51
-    str(d.ref3Address),
-    str(d.ref3CityStatePin), // 52-53
-    str(d.ref3ContactNo),
-    str(d.ref3Email), // 54-55
-    str(d.department),
-    str(d.position), // 56-57
-    str(d.circle),
-    str(d.projectName), // 58-59
-    dateStr(d.joiningDate),
-    str(d.reportingManager),
-    str(d.employmentType), // 60-62
-    str(d.bankName),
-    str(d.accountNumber), // 63-64
-    str(d.ifscCode)?.toUpperCase() || null, // 65
-    str(d.accountHolderName),
-    str(d.bankBranch), // 66-67
-  ]; // length 67
+    str(d.firstName), // $1  first_name
+    str(d.fatherHusbandName), // $2  father_husband_name
+    str(d.lastName), // $3  last_name
+    str(d.email)?.toLowerCase() ?? null, // $4  email
+    str(d.phone), // $5  phone
+    str(d.altPhone), // $6  alt_phone
+    dateStr(d.dob), // $7  date_of_birth
+    str(d.gender), // $8  gender
+    str(d.maritalStatus), // $9  marital_status
+    str(d.educationalQualification), // $10 educational_qualification
+    str(d.bloodGroup), // $11 blood_group
+    str(d.panNumber)?.toUpperCase() ?? null, // $12 pan_number
+    str(d.nameOnPan), // $13 name_on_pan
+    str(d.aadhar)?.replace(/\s/g, "") ?? null, // $14 aadhar_number
+    str(d.nameOnAadhar), // $15 name_on_aadhar
+    strUan(d.uanNumber), // $16 uan_number
+    str(d.familyMemberName), // $17 family_member_name
+    str(d.familyContactNo), // $18 family_contact_no
+    str(d.familyWorkingStatus), // $19 family_working_status
+    str(d.familyEmployerName), // $20 family_employer_name
+    str(d.familyEmployerContact), // $21 family_employer_contact
+    str(d.emergencyContactName), // $22 emergency_contact_name
+    str(d.emergencyContactNo), // $23 emergency_contact_no
+    str(d.emergencyContactAddress), // $24 emergency_contact_address
+    str(d.emergencyContactRelation), // $25 emergency_contact_relation
+    str(d.permanentAddress), // $26 permanent_address
+    str(d.permanentPhone), // $27 permanent_phone
+    str(d.permanentLandmark), // $28 permanent_landmark
+    str(d.permanentLatLong), // $29 permanent_lat_long
+    bool(d.localSameAsPermanent), // $30 local_same_as_permanent
+    local("localAddress", "permanentAddress"), // $31 local_address
+    local("localPhone", "permanentPhone"), // $32 local_phone
+    local("localLandmark", "permanentLandmark"), // $33 local_landmark
+    local("localLatLong", "permanentLatLong"), // $34 local_lat_long
+    str(d.ref1Name), // $35 ref1_name
+    str(d.ref1Designation), // $36 ref1_designation
+    str(d.ref1Organization), // $37 ref1_organization
+    str(d.ref1Address), // $38 ref1_address
+    str(d.ref1CityStatePin), // $39 ref1_city_state_pin
+    str(d.ref1ContactNo), // $40 ref1_contact_no
+    str(d.ref1Email), // $41 ref1_email
+    str(d.ref2Name), // $42 ref2_name
+    str(d.ref2Designation), // $43 ref2_designation
+    str(d.ref2Organization), // $44 ref2_organization
+    str(d.ref2Address), // $45 ref2_address
+    str(d.ref2CityStatePin), // $46 ref2_city_state_pin
+    str(d.ref2ContactNo), // $47 ref2_contact_no
+    str(d.ref2Email), // $48 ref2_email
+    str(d.ref3Name), // $49 ref3_name
+    str(d.ref3Designation), // $50 ref3_designation
+    str(d.ref3Organization), // $51 ref3_organization
+    str(d.ref3Address), // $52 ref3_address
+    str(d.ref3CityStatePin), // $53 ref3_city_state_pin
+    str(d.ref3ContactNo), // $54 ref3_contact_no
+    str(d.ref3Email), // $55 ref3_email
+    str(d.department), // $56 department
+    str(d.position), // $57 position
+    str(d.circle), // $58 circle
+    str(d.projectName), // $59 project_name
+    dateStr(d.joiningDate), // $60 joining_date
+    str(d.reportingManager), // $61 reporting_manager
+    str(d.employmentType), // $62 employment_type
+    str(d.bankName), // $63 bank_name
+    str(d.accountNumber), // $64 account_number
+    str(d.ifscCode)?.toUpperCase() ?? null, // $65 ifsc_code
+    str(d.accountHolderName), // $66 account_holder_name
+    str(d.bankBranch), // $67 bank_branch
+  ]; // length = 67
 }
 
-// Reusable UPDATE columns for resubmit and rejoin paths ($1…$67 + $68 = id)
+// ─── UPDATE SET clause ($1–$67 common fields, $68 = WHERE id) ────────────────
 const UPDATE_SET_COLS = `
   first_name = $1, father_husband_name = $2, last_name = $3,
   email = $4, phone = $5, alt_phone = $6,
@@ -207,18 +342,7 @@ const UPDATE_SET_COLS = `
   account_holder_name = $66, bank_branch = $67
 `;
 
-async function replaceDocuments(client, empDbId, files) {
-  if (!files || Object.keys(files).length === 0) return;
-  await client.query("DELETE FROM employee_documents WHERE employee_id = $1", [
-    empDbId,
-  ]);
-  await Promise.all(
-    Object.entries(files).map(([fieldName, arr]) =>
-      saveDocument(client, empDbId, fieldName, arr?.[0]),
-    ),
-  );
-}
-
+// ─── buildSnapshot ────────────────────────────────────────────────────────────
 function buildSnapshot(emp) {
   return {
     first_name: emp.first_name,
@@ -301,6 +425,7 @@ function buildSnapshot(emp) {
   };
 }
 
+// ─── restoreFromSnapshot ─────────────────────────────────────────────────────
 async function restoreFromSnapshot(
   client,
   empId,
@@ -316,19 +441,15 @@ async function restoreFromSnapshot(
     );
     return;
   }
-
   const s = typeof snapshot === "string" ? JSON.parse(snapshot) : snapshot;
-
   await client.query(
-    `
-    UPDATE employees SET
+    `UPDATE employees SET
       first_name=$1, last_name=$2, middle_name=$3, father_husband_name=$4,
       email=$5, phone=$6, alt_phone=$7,
       date_of_birth=$8, gender=$9, marital_status=$10,
       educational_qualification=$11, blood_group=$12,
       pan_number=$13, name_on_pan=$14,
-      aadhar_number=$15, name_on_aadhar=$16,
-      uan_number=$17,
+      aadhar_number=$15, name_on_aadhar=$16, uan_number=$17,
       family_member_name=$18, family_contact_no=$19, family_working_status=$20,
       family_employer_name=$21, family_employer_contact=$22,
       emergency_contact_name=$23, emergency_contact_no=$24,
@@ -350,8 +471,7 @@ async function restoreFromSnapshot(
       address=$72, city=$73, state=$74, zip_code=$75,
       status=$76,
       rejoin_snapshot=NULL, active_rejoin_link_id=NULL, updated_at=CURRENT_TIMESTAMP
-    WHERE id=$77
-  `,
+    WHERE id=$77`,
     [
       s.first_name,
       s.last_name,
@@ -446,15 +566,13 @@ export const checkAadhar = async (req, res) => {
         .status(400)
         .json({ success: false, message: "Aadhaar must be 12 digits." });
     }
-
     const { rows } = await client.query(
-      `SELECT id, first_name, last_name, email, phone, status, employee_id,
-              department, position, date_of_birth, gender, blood_group,
-              aadhar_number, name_on_aadhar, pan_number, name_on_pan,
-              father_husband_name, marital_status, educational_qualification,
-              alt_phone, permanent_address, permanent_phone, permanent_landmark,
-              permanent_lat_long, local_same_as_permanent, local_address,
-              local_phone, local_landmark, local_lat_long,
+      `SELECT id, first_name, father_husband_name, last_name, email, phone, alt_phone,
+              status, employee_id, department, position, date_of_birth, gender,
+              blood_group, aadhar_number, name_on_aadhar, pan_number, name_on_pan,
+              marital_status, educational_qualification, uan_number,
+              permanent_address, permanent_phone, permanent_landmark, permanent_lat_long,
+              local_same_as_permanent, local_address, local_phone, local_landmark, local_lat_long,
               family_member_name, family_contact_no, family_working_status,
               family_employer_name, family_employer_contact,
               emergency_contact_name, emergency_contact_no,
@@ -466,8 +584,7 @@ export const checkAadhar = async (req, res) => {
               ref3_name, ref3_designation, ref3_organization, ref3_address,
               ref3_city_state_pin, ref3_contact_no, ref3_email,
               bank_name, account_number, ifsc_code, account_holder_name, bank_branch,
-              joining_date, reporting_manager, employment_type, circle, project_name,
-              uan_number
+              joining_date, reporting_manager, employment_type, circle, project_name
        FROM employees
        WHERE aadhar_number = $1
        ORDER BY created_at DESC LIMIT 1`,
@@ -573,13 +690,16 @@ export const getPrefill = async (req, res) => {
   const client = await pool.connect();
   try {
     const { rows } = await client.query(
-      `
-      SELECT e.*,
+      `SELECT e.*,
         COALESCE(
-          json_agg(json_build_object(
-            'type', d.document_type, 'path', d.file_path,
-            'name', d.file_name, 'mime_type', d.mime_type
-          )) FILTER (WHERE d.id IS NOT NULL),
+          json_build_object(
+  'id', d.id,
+  'document_type', d.document_type,
+  'file_path', d.file_path,
+  'file_name', d.file_name,
+  'file_size', d.file_size,
+  'mime_type', d.mime_type
+) FILTER (WHERE d.id IS NOT NULL),
           '[]'::json
         ) AS documents
       FROM employees e
@@ -587,8 +707,7 @@ export const getPrefill = async (req, res) => {
       WHERE e.resubmit_token = $1
         AND e.resubmit_expires_at > CURRENT_TIMESTAMP
         AND e.status = 'rejected'
-      GROUP BY e.id
-    `,
+      GROUP BY e.id`,
       [req.params.token],
     );
 
@@ -606,8 +725,8 @@ export const getPrefill = async (req, res) => {
         resubmitToken: emp.resubmit_token,
         rejectionReason: emp.rejection_reason,
         firstName: emp.first_name,
-        lastName: emp.last_name,
         fatherHusbandName: emp.father_husband_name,
+        lastName: emp.last_name,
         dob: emp.date_of_birth
           ? emp.date_of_birth.toISOString().split("T")[0]
           : "",
@@ -689,218 +808,187 @@ export const getPrefill = async (req, res) => {
 
 // =============================================================================
 // POST /api/registrations
-// Requires: handleUpload, resolveSubmissionContext, guardNoDuplicateAadhar
-// req.submissionType  — 'new' | 'resubmit' | 'rejoin'
-// req.existingEmpId   — set for resubmit / rejoin
-// req.registrationLink — set for new / rejoin
+// Middleware: handleUpload → resolveSubmissionContext → guardNoDuplicateAadhar
 // =============================================================================
 export const submitRegistration = async (req, res) => {
   const client = await pool.connect();
+  let s3Urls = null; // declared here so the catch block can roll back S3 uploads
   try {
     const d = req.body;
     const f = req.files || {};
     const { submissionType, existingEmpId, registrationLink } = req;
 
-    // ── DEBUG: log file info to confirm multer parsed them ─────────────────
+    // ── DEBUG logs ─────────────────────────────────────────────────────────
     console.log("📂 [submitRegistration] submissionType:", submissionType);
-    console.log("📂 [submitRegistration] req.files keys:", Object.keys(f));
+    console.log("📂 [submitRegistration] files received:", Object.keys(f));
     console.log(
-      "📂 [submitRegistration] idPhoto entry:",
-      f?.idPhoto?.[0]
-        ? `✅ ${f.idPhoto[0].originalname} (${f.idPhoto[0].size} bytes)`
-        : "❌ MISSING",
+      "📂 idPhoto   :",
+      f?.idPhoto?.[0] ? `✅ ${f.idPhoto[0].originalname}` : "❌ MISSING",
+    );
+    console.log(
+      "📂 aadharCard:",
+      f?.aadharCard?.[0] ? `✅ ${f.aadharCard[0].originalname}` : "❌ MISSING",
+    );
+    console.log(
+      "📂 resume    :",
+      f?.resume?.[0] ? `✅ ${f.resume[0].originalname}` : "❌ MISSING",
     );
 
-    const commonFields = buildCommonFields(d);
+    const cf = buildCommonFields(d);
+
+    // ── Upload all submitted files to S3 first ────────────────────────────
+    // With multer memoryStorage the files are in req.file.buffer.
+    // We must upload them to S3 before touching the DB so we have real keys.
+    try {
+      s3Urls = await uploadAllFilesToS3(f);
+      console.log("📂 [submitRegistration] S3 keys:", {
+        idPhoto: s3Urls.idPhotoUrl,
+        aadhar: s3Urls.aadharCardUrl,
+        resume: s3Urls.resumeUrl,
+      });
+    } catch (s3Err) {
+      console.error("❌ [submitRegistration] S3 upload failed:", s3Err.message);
+      return res.status(500).json({
+        success: false,
+        message: "File upload to storage failed. Please try again.",
+      });
+    }
+
+    // Enrich req.files entries with the S3 key so saveDocument() works correctly
+    const FILE_FIELD_MAP = {
+      idPhoto: s3Urls.idPhotoUrl,
+      aadharCard: s3Urls.aadharCardUrl,
+      panCard: s3Urls.panCardUrl,
+      resume: s3Urls.resumeUrl,
+      bankPassbook: s3Urls.bankPassbookUrl,
+      payslip: s3Urls.paySlipUrl,
+      otherCertificates: s3Urls.otherCertsUrl,
+      medicalCertificate: s3Urls.medCertUrl,
+      academicRecords: s3Urls.acadUrl,
+      farmToCli: s3Urls.farmToCliUrl,
+    };
+    for (const [field, key] of Object.entries(FILE_FIELD_MAP)) {
+      if (key && f[field]?.[0]) f[field][0].key = key;
+    }
+
+    // For new registrations idPhoto is mandatory (NOT NULL in DB)
+    if (submissionType === "new" && !s3Urls.idPhotoUrl) {
+      return res.status(400).json({
+        success: false,
+        message: "Photo (idPhoto) is required.",
+      });
+    }
+
+    // Helper to pick the right url value depending on flow
+    const u = s3Urls;
 
     await client.query("BEGIN");
-
     let employeeDbId;
 
-    // ── Resubmit ──────────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // RESUBMIT
+    // ══════════════════════════════════════════════════════════════════════
     if (submissionType === "resubmit") {
-      const photoUrl = fileUrl(f, "idPhoto", "id_photo");
-      const aadharUrl = fileUrl(f, "aadharCard", "aadhar_card");
-      const panUrl = fileUrl(f, "panCard", "pan_card");
-      const passbookUrl = fileUrl(f, "bankPassbook", "bank_passbook");
-      const resumeUrl = fileUrl(f, "resume");
-      const medCertUrl = fileUrl(
-        f,
-        "medicalCertificate",
-        "medical_certificate",
-      );
-      const acadUrl = fileUrl(f, "academicRecords", "academic_records");
-      const payslipUrl = fileUrl(f, "payslip");
-      const otherCertUrl = fileUrl(
-        f,
-        "otherCertificates",
-        "other_certificates",
-      );
-      const farmToCliUrl = fileUrl(f, "farmToCli", "farm_to_cli");
-
       const { rows } = await client.query(
-        `
-        UPDATE employees SET ${UPDATE_SET_COLS},
+        `UPDATE employees SET ${UPDATE_SET_COLS},
           status = 'pending',
           rejection_reason = NULL, rejected_by = NULL, rejected_at = NULL,
           resubmit_token = NULL, resubmit_expires_at = NULL,
           updated_at = CURRENT_TIMESTAMP,
-          id_photo_url                  = COALESCE($69,  id_photo_url,                  ''),
-          aadhar_card_url               = COALESCE($70,  aadhar_card_url,               ''),
-          pan_card_url                  = COALESCE($71,  pan_card_url,                  ''),
-          bank_passbook_url             = COALESCE($72,  bank_passbook_url,             ''),
-          resume_url                    = COALESCE($73,  resume_url,                    ''),
-          medical_certificate_url       = COALESCE($74,  medical_certificate_url,       ''),
-          academic_records_url          = COALESCE($75,  academic_records_url,          ''),
-          pay_slip_url                  = COALESCE($76,  pay_slip_url,                  ''),
-          other_certificates_url        = COALESCE($77,  other_certificates_url,        ''),
-          farm_to_cli_certificate_url   = COALESCE($78,  farm_to_cli_certificate_url,   '')
-        WHERE id = $79
-        RETURNING id
-      `,
+          id_photo_url               = COALESCE($68, id_photo_url,               ''),
+          aadhar_card_url            = COALESCE($69, aadhar_card_url,            ''),
+          pan_card_url               = COALESCE($70, pan_card_url,               ''),
+          resume_url                 = COALESCE($71, resume_url,                 ''),
+          bank_passbook_url          = COALESCE($72, bank_passbook_url,          ''),
+          pay_slip_url               = COALESCE($73, pay_slip_url,               ''),
+          other_certificates_url     = COALESCE($74, other_certificates_url,     ''),
+          medical_certificate_url    = COALESCE($75, medical_certificate_url,    ''),
+          academic_records_url       = COALESCE($76, academic_records_url,       ''),
+          farm_to_cli_certificate_url= COALESCE($77, farm_to_cli_certificate_url,'')
+        WHERE id = $78
+        RETURNING id`,
         [
-          ...commonFields,
-          photoUrl, // $68
-          aadharUrl, // $69
-          panUrl, // $70
-          passbookUrl, // $71
-          resumeUrl, // $72
-          medCertUrl, // $73
-          acadUrl, // $74
-          payslipUrl, // $75
-          otherCertUrl, // $76
-          farmToCliUrl, // $77
-          existingEmpId, // $78 — wait this doesn't add up, COALESCE goes to $78 not $79
-          // NOTE: UPDATE_SET_COLS uses $1-$67, so doc urls start at $68.
-          // But in the query above they're labeled $69-$78 and WHERE id=$79.
-          // This is correct because the spread starts at $1 so $68 = photoUrl.
-          // Postgres will map them sequentially regardless of the comments.
+          ...cf, // $1–$67
+          u.idPhotoUrl, // $68
+          u.aadharCardUrl, // $69
+          u.panCardUrl, // $70
+          u.resumeUrl, // $71
+          u.bankPassbookUrl, // $72
+          u.paySlipUrl, // $73
+          u.otherCertsUrl, // $74
+          u.medCertUrl, // $75
+          u.acadUrl, // $76
+          u.farmToCliUrl, // $77
+          existingEmpId, // $78
         ],
       );
-
       employeeDbId = rows[0].id;
       await replaceDocuments(client, employeeDbId, f);
     }
 
-    // ── Rejoin ────────────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // REJOIN
+    // ══════════════════════════════════════════════════════════════════════
     else if (submissionType === "rejoin") {
-      const photoUrl = fileUrl(f, "idPhoto", "id_photo");
-      const aadharUrl = fileUrl(f, "aadharCard", "aadhar_card");
-      const panUrl = fileUrl(f, "panCard", "pan_card");
-      const passbookUrl = fileUrl(f, "bankPassbook", "bank_passbook");
-      const resumeUrl = fileUrl(f, "resume");
-      const medCertUrl = fileUrl(
-        f,
-        "medicalCertificate",
-        "medical_certificate",
-      );
-      const acadUrl = fileUrl(f, "academicRecords", "academic_records");
-      const payslipUrl = fileUrl(f, "payslip");
-      const otherCertUrl = fileUrl(
-        f,
-        "otherCertificates",
-        "other_certificates",
-      );
-      const farmToCliUrl = fileUrl(f, "farmToCli", "farm_to_cli");
-
       const { rows } = await client.query(
-        `
-        UPDATE employees SET ${UPDATE_SET_COLS},
+        `UPDATE employees SET ${UPDATE_SET_COLS},
           status = 'pending_rejoin',
           rejection_reason = NULL, rejected_by = NULL, rejected_at = NULL,
           resubmit_token = NULL, resubmit_expires_at = NULL,
           rejoin_requested_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP,
-          id_photo_url                  = COALESCE($69,  id_photo_url,                  ''),
-          aadhar_card_url               = COALESCE($70,  aadhar_card_url,               ''),
-          pan_card_url                  = COALESCE($71,  pan_card_url,                  ''),
-          bank_passbook_url             = COALESCE($72,  bank_passbook_url,             ''),
-          resume_url                    = COALESCE($73,  resume_url,                    ''),
-          medical_certificate_url       = COALESCE($74,  medical_certificate_url,       ''),
-          academic_records_url          = COALESCE($75,  academic_records_url,          ''),
-          pay_slip_url                  = COALESCE($76,  pay_slip_url,                  ''),
-          other_certificates_url        = COALESCE($77,  other_certificates_url,        ''),
-          farm_to_cli_certificate_url   = COALESCE($78,  farm_to_cli_certificate_url,   '')
-        WHERE id = $79
-        RETURNING id
-      `,
+          id_photo_url               = COALESCE($68, id_photo_url,               ''),
+          aadhar_card_url            = COALESCE($69, aadhar_card_url,            ''),
+          pan_card_url               = COALESCE($70, pan_card_url,               ''),
+          resume_url                 = COALESCE($71, resume_url,                 ''),
+          bank_passbook_url          = COALESCE($72, bank_passbook_url,          ''),
+          pay_slip_url               = COALESCE($73, pay_slip_url,               ''),
+          other_certificates_url     = COALESCE($74, other_certificates_url,     ''),
+          medical_certificate_url    = COALESCE($75, medical_certificate_url,    ''),
+          academic_records_url       = COALESCE($76, academic_records_url,       ''),
+          farm_to_cli_certificate_url= COALESCE($77, farm_to_cli_certificate_url,'')
+        WHERE id = $78
+        RETURNING id`,
         [
-          ...commonFields,
-          photoUrl,
-          aadharUrl,
-          panUrl,
-          passbookUrl,
-          resumeUrl,
-          medCertUrl,
-          acadUrl,
-          payslipUrl,
-          otherCertUrl,
-          farmToCliUrl,
+          ...cf,
+          u.idPhotoUrl,
+          u.aadharCardUrl,
+          u.panCardUrl,
+          u.resumeUrl,
+          u.bankPassbookUrl,
+          u.paySlipUrl,
+          u.otherCertsUrl,
+          u.medCertUrl,
+          u.acadUrl,
+          u.farmToCliUrl,
           existingEmpId,
         ],
       );
-
       employeeDbId = rows[0].id;
       await replaceDocuments(client, employeeDbId, f);
-
       await client.query(
-        `UPDATE registration_links
-         SET is_used=true, status='used', used_at=CURRENT_TIMESTAMP
-         WHERE id=$1`,
+        `UPDATE registration_links SET is_used=true, status='used', used_at=CURRENT_TIMESTAMP WHERE id=$1`,
         [registrationLink.id],
       );
     }
 
-    // ── New employee ──────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // NEW EMPLOYEE
+    // ══════════════════════════════════════════════════════════════════════
     else {
-      const cf = commonFields;
-
-      // ── FIX: use fileUrlRequired() which ALWAYS returns a string, never null.
-      // This prevents the NOT NULL constraint violation on *_url columns.
-      // The empty string "" satisfies NOT NULL; real S3 URLs replace it
-      // when the employee uploads docs via the doc-upload flow post-approval.
-      const photoUrl = fileUrlRequired(f, "idPhoto", "id_photo");
-      const aadharUrl = fileUrlRequired(f, "aadharCard", "aadhar_card");
-      const panUrl = fileUrlRequired(f, "panCard", "pan_card");
-      const passbookUrl = fileUrlRequired(f, "bankPassbook", "bank_passbook");
-      const resumeUrl = fileUrlRequired(f, "resume");
-      const medCertUrl = fileUrlRequired(
-        f,
-        "medicalCertificate",
-        "medical_certificate",
-      );
-      const acadUrl = fileUrlRequired(f, "academicRecords", "academic_records");
-      const payslipUrl = fileUrlRequired(f, "payslip");
-      const otherCertUrl = fileUrlRequired(
-        f,
-        "otherCertificates",
-        "other_certificates",
-      );
-      const farmToCliUrl = fileUrlRequired(f, "farmToCli", "farm_to_cli");
-
-      console.log("📂 [new employee] resolved doc URLs:", {
-        photoUrl,
-        aadharUrl,
-        panUrl,
-        passbookUrl,
-        resumeUrl,
-        medCertUrl,
-        acadUrl,
-        payslipUrl,
-        otherCertUrl,
-        farmToCliUrl,
+      console.log("📂 [new] doc URLs:", {
+        idPhoto: u.idPhotoUrl,
+        aadhar: u.aadharCardUrl,
       });
 
       const { rows } = await client.query(
-        `
-        INSERT INTO employees (
+        `INSERT INTO employees (
           registration_link_id,
           first_name, father_husband_name, last_name,
           email, phone, alt_phone,
           date_of_birth, gender, marital_status,
           educational_qualification, blood_group,
-          pan_number, name_on_pan, aadhar_number, name_on_aadhar,
-          uan_number,
+          pan_number, name_on_pan, aadhar_number, name_on_aadhar, uan_number,
           family_member_name, family_contact_no, family_working_status,
           family_employer_name, family_employer_contact,
           emergency_contact_name, emergency_contact_no,
@@ -918,9 +1006,16 @@ export const submitRegistration = async (req, res) => {
           bank_name, account_number, ifsc_code, account_holder_name, bank_branch,
           address, city, state, zip_code,
           status,
-          id_photo_url, aadhar_card_url, pan_card_url, bank_passbook_url, resume_url,
-          medical_certificate_url, academic_records_url, pay_slip_url,
-          other_certificates_url, farm_to_cli_certificate_url
+          id_photo_url,
+          aadhar_card_url,
+          pan_card_url,
+          resume_url,
+          bank_passbook_url,
+          pay_slip_url,
+          other_certificates_url,
+          medical_certificate_url,
+          academic_records_url,
+          farm_to_cli_certificate_url
         ) VALUES (
           $1,
           $2,$3,$4,$5,$6,$7,$8,$9,$10,
@@ -934,109 +1029,131 @@ export const submitRegistration = async (req, res) => {
           $64,$65,$66,$67,$68,
           $69,$70,$71,$72,
           $73,
-          $74,$75,$76,$77,$78,
-          $79,$80,$81,$82,$83
-        ) RETURNING id
-      `,
+          $74,$75,$76,$77,$78,$79,$80,$81,$82,$83
+        ) RETURNING id`,
         [
-          registrationLink.id, // $1
+          registrationLink.id, // $1  registration_link_id
           cf[0],
           cf[1],
-          cf[2],
+          cf[2], // $2  first_name, father_husband_name, last_name
           cf[3],
           cf[4],
-          cf[5],
+          cf[5], // $5  email, phone, alt_phone
           cf[6],
           cf[7],
-          cf[8], // $2-$10
+          cf[8], // $8  date_of_birth, gender, marital_status
           cf[9],
-          cf[10],
+          cf[10], // $11 educational_qualification, blood_group
           cf[11],
           cf[12],
           cf[13],
           cf[14],
-          cf[15], // $11-$17
+          cf[15], // $13 pan_number..uan_number
           cf[16],
           cf[17],
-          cf[18],
+          cf[18], // $18 family_member_name..family_working_status
           cf[19],
-          cf[20],
+          cf[20], // $21 family_employer_name, family_employer_contact
           cf[21],
-          cf[22],
+          cf[22], // $23 emergency_contact_name, emergency_contact_no
           cf[23],
-          cf[24], // $18-$26
+          cf[24], // $25 emergency_contact_address, emergency_contact_relation
           cf[25],
           cf[26],
           cf[27],
-          cf[28],
+          cf[28], // $27 permanent_address..permanent_lat_long
           cf[29],
           cf[30],
           cf[31],
           cf[32],
-          cf[33], // $27-$35
+          cf[33], // $31 local_same_as_permanent..local_lat_long
           cf[34],
           cf[35],
-          cf[36],
+          cf[36], // $36 ref1_name..ref1_organization
           cf[37],
           cf[38],
           cf[39],
-          cf[40], // $36-$42
+          cf[40], // $39 ref1_address..ref1_email
           cf[41],
           cf[42],
-          cf[43],
+          cf[43], // $43 ref2_name..ref2_organization
           cf[44],
           cf[45],
           cf[46],
-          cf[47], // $43-$49
+          cf[47], // $46 ref2_address..ref2_email
           cf[48],
           cf[49],
-          cf[50],
+          cf[50], // $50 ref3_name..ref3_organization
           cf[51],
           cf[52],
           cf[53],
-          cf[54], // $50-$56
+          cf[54], // $53 ref3_address..ref3_email
           cf[55],
           cf[56],
           cf[57],
-          cf[58],
+          cf[58], // $57 department, position, circle, project_name
           cf[59],
           cf[60],
-          cf[61], // $57-$63
+          cf[61], // $61 joining_date, reporting_manager, employment_type
           cf[62],
           cf[63],
           cf[64],
           cf[65],
-          cf[66], // $64-$68
-          str(d.permanentAddress) || "",
-          "",
-          "",
-          "", // $69-$72 address,city,state,zip
-          "pending", // $73
-          photoUrl, // $74 → id_photo_url
-          aadharUrl, // $75 → aadhar_card_url
-          panUrl, // $76 → pan_card_url
-          passbookUrl, // $77 → bank_passbook_url
-          resumeUrl, // $78 → resume_url
-          medCertUrl, // $79 → medical_certificate_url
-          acadUrl, // $80 → academic_records_url
-          payslipUrl, // $81 → pay_slip_url
-          otherCertUrl, // $82 → other_certificates_url
-          farmToCliUrl, // $83 → farm_to_cli_certificate_url
+          cf[66], // $64 bank_name..bank_branch
+          str(d.permanentAddress) || "", // $69 address
+          "", // $70 city
+          "", // $71 state
+          "", // $72 zip_code
+          "pending", // $73 status
+          u.idPhotoUrl, // $74 id_photo_url
+          u.aadharCardUrl, // $75 aadhar_card_url
+          u.panCardUrl, // $76 pan_card_url
+          u.resumeUrl, // $77 resume_url
+          u.bankPassbookUrl, // $78 bank_passbook_url
+          u.paySlipUrl, // $79 pay_slip_url
+          u.otherCertsUrl, // $80 other_certificates_url
+          u.medCertUrl, // $81 medical_certificate_url
+          u.acadUrl, // $82 academic_records_url
+          u.farmToCliUrl, // $83 farm_to_cli_certificate_url
         ],
       );
 
       employeeDbId = rows[0].id;
 
+      // ── Save all submitted documents to employee_documents ────────────────
+      // We iterate req.files; each file has been enriched with file.key (the
+      // S3 key) above in the FILE_FIELD_MAP loop, so saveDocument stores the
+      // correct key in file_path.
+      //
+      // The idPhoto is handled FIRST and explicitly so it never gets skipped.
+      // This guarantees employee_documents always has a 'photo' row for KYE
+      // employees, which is what the EMP_SELECT UNION Source 1 returns and
+      // what getPhotoUrl() on the frontend looks for in documents[].
+      if (u.idPhotoUrl && f.idPhoto?.[0]) {
+        // saveDocument normalises 'idPhoto' → 'photo' via FIELD_TO_DOC_TYPE
+        await saveDocument(client, employeeDbId, "idPhoto", f.idPhoto[0]);
+        // FIX: Also keep id_photo_url column in sync with the S3 key so that
+        // resolveDocUrls() on the backend and getPhotoUrl() on the frontend
+        // always have a reliable fallback path to the KYE registration photo.
+        // The INSERT above already sets id_photo_url = u.idPhotoUrl but we
+        // explicitly update here to handle any edge-case ordering issues.
+        await client.query(
+          `UPDATE employees SET id_photo_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+          [u.idPhotoUrl, employeeDbId],
+        );
+      }
+      // Save remaining documents (idPhoto will be skipped by saveDocument if
+      // already handled, since it uses UPSERT-safe insert; other fields saved normally)
       await Promise.all(
-        Object.entries(f).map(([fieldName, arr]) =>
-          saveDocument(client, employeeDbId, fieldName, arr?.[0]),
-        ),
+        Object.entries(f)
+          .filter(([fieldName]) => fieldName !== "idPhoto")
+          .map(([fieldName, arr]) =>
+            saveDocument(client, employeeDbId, fieldName, arr?.[0]),
+          ),
       );
 
       await client.query(
-        `UPDATE registration_links
-         SET is_used=true, status='used', used_at=CURRENT_TIMESTAMP
-         WHERE id=$1`,
+        `UPDATE registration_links SET is_used=true, status='used', used_at=CURRENT_TIMESTAMP WHERE id=$1`,
         [registrationLink.id],
       );
     }
@@ -1087,6 +1204,13 @@ export const submitRegistration = async (req, res) => {
     });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
+    // Roll back any S3 files uploaded during this request
+    if (s3Urls?.uploadedKeys?.length) {
+      Promise.all(s3Urls.uploadedKeys.map((k) => deleteFileFromS3(k))).catch(
+        (e) =>
+          console.warn("[submitRegistration] S3 rollback error:", e.message),
+      );
+    }
     cleanupFiles(req.files);
     console.error("❌ [submitRegistration]", err.message);
     return res.status(500).json({
@@ -1121,7 +1245,6 @@ export const getPending = async (_req, res) => {
       GROUP BY e.id, rl.link_id, rl.employee_email
       ORDER BY e.created_at DESC
     `);
-
     return res.json({ success: true, count: rows.length, data: rows });
   } catch (err) {
     console.error("❌ [getPending]", err.message);
@@ -1142,8 +1265,7 @@ export const approve = async (req, res) => {
       req.body?.isRejoin === true || req.body?.isRejoin === "true";
 
     const { rows } = await client.query(
-      `
-      SELECT e.*,
+      `SELECT e.*,
         COALESCE(
           json_agg(json_build_object(
             'type', d.document_type, 'path', d.file_path,
@@ -1154,8 +1276,7 @@ export const approve = async (req, res) => {
       FROM employees e
       LEFT JOIN employee_documents d ON d.employee_id = e.id
       WHERE e.id = $1
-      GROUP BY e.id
-    `,
+      GROUP BY e.id`,
       [id],
     );
 
@@ -1172,18 +1293,12 @@ export const approve = async (req, res) => {
     const previousEmployeeId = employee.employee_id;
 
     await client.query(
-      `
-      UPDATE employees SET
-        status                  = 'active',
-        employee_id             = $1,
-        approved_at             = CURRENT_TIMESTAMP,
-        updated_at              = CURRENT_TIMESTAMP,
-        rejoin_snapshot         = NULL,
-        active_rejoin_link_id   = NULL,
-        active_doc_upload_token = $2,
-        docs_submitted          = false
-      WHERE id = $3
-    `,
+      `UPDATE employees SET
+        status = 'active', employee_id = $1,
+        approved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+        rejoin_snapshot = NULL, active_rejoin_link_id = NULL,
+        active_doc_upload_token = $2, docs_submitted = false
+      WHERE id = $3`,
       [newEmployeeId, uploadToken, id],
     );
 
@@ -1269,17 +1384,12 @@ export const reject = async (req, res) => {
     const resubmitExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     const { rows } = await client.query(
-      `
-      UPDATE employees
-        SET status              = 'rejected',
-            rejection_reason    = $1,
-            rejected_by         = $2,
-            rejected_at         = CURRENT_TIMESTAMP,
-            resubmit_token      = $3,
-            resubmit_expires_at = $4
+      `UPDATE employees SET
+        status = 'rejected', rejection_reason = $1,
+        rejected_by = $2, rejected_at = CURRENT_TIMESTAMP,
+        resubmit_token = $3, resubmit_expires_at = $4
       WHERE id = $5
-      RETURNING *
-    `,
+      RETURNING *`,
       [reason, adminId, resubmitToken, resubmitExpiry, id],
     );
 
@@ -1347,7 +1457,6 @@ export const rejectRejoin = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Employee not found." });
     }
-
     const emp = empRows[0];
     if (emp.status !== "pending_rejoin") {
       return res.status(400).json({
@@ -1358,7 +1467,6 @@ export const rejectRejoin = async (req, res) => {
 
     await client.query("BEGIN");
     await restoreFromSnapshot(client, emp.id, emp.rejoin_snapshot, "inactive");
-
     await client.query(
       `UPDATE employees SET rejection_reason=$1, rejected_at=CURRENT_TIMESTAMP WHERE id=$2`,
       [reason, emp.id],
@@ -1375,7 +1483,7 @@ export const rejectRejoin = async (req, res) => {
       `INSERT INTO registration_links
          (link_id, employee_email, status, expires_at, is_used,
           is_rejoin, prefill_employee_id, multi_use, use_count)
-       VALUES ($1, $2, 'active', $3, false, true, $4, false, 0)`,
+       VALUES ($1,$2,'active',$3,false,true,$4,false,0)`,
       [newLinkId, emp.email, expiresAt, emp.id],
     );
 
@@ -1391,9 +1499,8 @@ export const rejectRejoin = async (req, res) => {
 
     const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
     const rejoinUrl = `${FRONTEND_URL}/registration/${newLinkId}`;
-
     console.log(
-      `↩️  [rejectRejoin] Employee ${emp.id} — snapshot restored, re-edit link: ${newLinkId}`,
+      `↩️  [rejectRejoin] Employee ${emp.id} snapshot restored, re-edit link: ${newLinkId}`,
     );
 
     setImmediate(async () => {

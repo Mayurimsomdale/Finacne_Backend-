@@ -24,15 +24,12 @@ const PORT = process.env.PORT || 5000;
 
 const startupErrors = [];
 
-// ============================================================
-// CORS CONFIGURATION (Consolidated Whitelist)
-// ============================================================
-const allowedOrigins = [
-  process.env.FRONTEND_URL, // from .env  e.g. https://finance.instagrp.com
-  "http://localhost:3000", // local dev
-  "http://localhost:5173", // vite dev
-].filter(Boolean); // removes undefined if env var missing
 
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  process.env.FRONTEND_URL_LOCAL, // http://localhost:3000
+  
+].filter(Boolean);
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, curl, server-to-server)

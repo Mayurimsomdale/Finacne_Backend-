@@ -1,13 +1,8 @@
 // middleware/employeeMng/registration.middleware.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Middleware for the employee registration form submission flow.
-// Covers: multer upload, link/token resolution, rejoin guard, aadhar dup-check.
-//
-// S3 CHANGE: switched from diskStorage to memoryStorage.
-// Files now land in req.files[field][n].buffer — nothing written to disk.
-// cleanupFiles() becomes a no-op — no disk temp files to remove.
-// All original logic (resolveSubmissionContext, guardNoDuplicateAadhar) is
-// completely unchanged.
+// Multer upload + submission context resolution + aadhar dup-check.
+// Field names match DB columns exactly.
+// memoryStorage — nothing written to disk.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import multer from "multer";
@@ -16,13 +11,14 @@ import pool from "../../config/database.js";
 // ── Memory storage ────────────────────────────────────────────────────────────
 const storage = multer.memoryStorage();
 
-
-  const _upload = multer({
+// ── Multer instance ───────────────────────────────────────────────────────────
+// Field names MUST match exactly what RegistrationForm.jsx appends to FormData.
+const _upload = multer({
   storage,
-  limits: { 
-    fileSize: 20 * 1024 * 1024,   // 20MB per file
-    files: 10,                     // max 10 files total
-    fieldSize: 10 * 1024 * 1024,  // 10MB for text fields
+  limits: {
+    fileSize: 20 * 1024 * 1024, // 20 MB per file
+    files: 10, // max 10 files total
+    fieldSize: 10 * 1024 * 1024, // 10 MB for text fields
   },
   fileFilter: (_req, file, cb) => {
     const allowed = [
@@ -42,39 +38,35 @@ const storage = multer.memoryStorage();
         );
   },
 }).fields([
-  { name: "idPhoto", maxCount: 1 },
-  { name: "aadharCard", maxCount: 1 },
-  { name: "panCard", maxCount: 1 },
-  { name: "resume", maxCount: 1 },
-  { name: "medicalCertificate", maxCount: 1 },
-  { name: "academicRecords", maxCount: 1 },
-  { name: "bankPassbook", maxCount: 1 },
-  { name: "payslip", maxCount: 1 },
-  { name: "farmToCli", maxCount: 1 },
-  { name: "otherCertificates", maxCount: 1 },
+  // ── camelCase names match RegistrationForm.jsx FormData.append() calls ──
+  { name: "idPhoto", maxCount: 1 }, // → id_photo_url
+  { name: "aadharCard", maxCount: 1 }, // → aadhar_card_url
+  { name: "panCard", maxCount: 1 }, // → pan_card_url
+  { name: "resume", maxCount: 1 }, // → resume_url
+  { name: "bankPassbook", maxCount: 1 }, // → bank_passbook_url
+  { name: "medicalCertificate", maxCount: 1 }, // → medical_certificate_url
+  { name: "academicRecords", maxCount: 1 }, // → academic_records_url
+  { name: "payslip", maxCount: 1 }, // → pay_slip_url
+  { name: "farmToCli", maxCount: 1 }, // → farm_to_cli_certificate_url
+  { name: "otherCertificates", maxCount: 1 }, // → other_certificates_url
 ]);
 
-/**
- * No-op — kept for import compatibility.
- * With memoryStorage there are no temp files on disk to delete.
- */
+// ── No-op — kept for import compatibility ────────────────────────────────────
 export function cleanupFiles(_files = {}) {}
 
-// ─── handleUpload ─────────────────────────────────────────────────────────────
+// ── handleUpload ──────────────────────────────────────────────────────────────
 export const handleUpload = (req, res, next) => {
   _upload(req, res, (err) => {
     if (!err) return next();
-
     const message =
       err.code === "LIMIT_FILE_SIZE"
-        ? "File size must be less than 5 MB."
+        ? "File size must be less than 20 MB."
         : err.message || "File upload error.";
-
     return res.status(400).json({ success: false, message });
   });
 };
 
-// ─── resolveSubmissionContext ─────────────────────────────────────────────────
+// ── resolveSubmissionContext ──────────────────────────────────────────────────
 export const resolveSubmissionContext = async (req, res, next) => {
   const d = req.body;
   const str = (v) =>
@@ -97,14 +89,12 @@ export const resolveSubmissionContext = async (req, res, next) => {
            AND status = 'rejected'`,
         [resubmitToken],
       );
-
       if (!rows[0]) {
         return res.status(410).json({
           success: false,
           message: "Resubmission link is invalid or has expired.",
         });
       }
-
       req.submissionType = "resubmit";
       req.existingEmpId = rows[0].id;
       return next();
@@ -119,23 +109,17 @@ export const resolveSubmissionContext = async (req, res, next) => {
           message: "Aadhaar number is required for rejoin.",
         });
       }
-
       const { rows: empRows } = await pool.query(
-        `SELECT * FROM employees
-         WHERE aadhar_number = $1
-         ORDER BY created_at DESC LIMIT 1`,
+        `SELECT * FROM employees WHERE aadhar_number = $1 ORDER BY created_at DESC LIMIT 1`,
         [aadhar],
       );
-
       if (!empRows[0]) {
         return res.status(404).json({
           success: false,
           message: "No existing record found for this Aadhaar number.",
         });
       }
-
       const emp = empRows[0];
-
       if (emp.status === "blacklisted") {
         return res.status(403).json({
           success: false,
@@ -148,37 +132,30 @@ export const resolveSubmissionContext = async (req, res, next) => {
           message: "This employee is currently active.",
         });
       }
-
       if (!linkId) {
         return res.status(400).json({
           success: false,
           message: "Missing registration link ID for rejoin request.",
         });
       }
-
       const { rows: linkRows } = await pool.query(
         `SELECT * FROM registration_links WHERE link_id = $1`,
         [linkId],
       );
-
       if (!linkRows[0]) {
         return res
           .status(404)
           .json({ success: false, message: "Invalid registration link." });
       }
-
       const link = linkRows[0];
-
-      if (link.is_used) {
+      if (link.is_used)
         return res
           .status(410)
           .json({ success: false, used: true, message: "Link already used." });
-      }
-      if (new Date(link.expires_at) < new Date()) {
+      if (new Date(link.expires_at) < new Date())
         return res
           .status(410)
           .json({ success: false, expired: true, message: "Link expired." });
-      }
 
       req.submissionType = "rejoin";
       req.existingEmp = emp;
@@ -193,53 +170,44 @@ export const resolveSubmissionContext = async (req, res, next) => {
         `SELECT * FROM registration_links WHERE link_id = $1`,
         [linkId],
       );
-
       if (!linkRows[0]) {
         return res
           .status(404)
           .json({ success: false, message: "Invalid registration link." });
       }
-
       const link = linkRows[0];
-
-      if (link.is_used) {
+      if (link.is_used)
         return res
           .status(410)
           .json({ success: false, used: true, message: "Link already used." });
-      }
-      if (new Date(link.expires_at) < new Date()) {
+      if (new Date(link.expires_at) < new Date())
         return res
           .status(410)
           .json({ success: false, expired: true, message: "Link expired." });
-      }
 
       req.submissionType = "new";
       req.registrationLink = link;
       return next();
     }
 
-    // ── None of the above ──────────────────────────────────────────────────
-    return res.status(400).json({
-      success: false,
-      message: "Missing linkId or resubmitToken.",
-    });
+    return res
+      .status(400)
+      .json({ success: false, message: "Missing linkId or resubmitToken." });
   } catch (err) {
     console.error("❌ [resolveSubmissionContext]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
-// ─── guardNoDuplicateAadhar ────────────────────────────────────────────────
+// ── guardNoDuplicateAadhar ────────────────────────────────────────────────────
 export const guardNoDuplicateAadhar = async (req, res, next) => {
   if (req.submissionType !== "new") return next();
 
-  const raw = req.body.aadhar;
   const str = (v) =>
     v !== undefined && v !== null && String(v).trim() !== ""
       ? String(v).trim()
       : null;
-  const aadhar = str(raw)?.replace(/\s/g, "") || null;
-
+  const aadhar = str(req.body.aadhar)?.replace(/\s/g, "") || null;
   if (!aadhar) return next();
 
   try {
@@ -247,7 +215,6 @@ export const guardNoDuplicateAadhar = async (req, res, next) => {
       `SELECT id, status FROM employees WHERE aadhar_number = $1`,
       [aadhar],
     );
-
     if (rows.length > 0) {
       return res.status(409).json({
         success: false,
@@ -256,7 +223,6 @@ export const guardNoDuplicateAadhar = async (req, res, next) => {
         message: "An employee with this Aadhaar number already exists.",
       });
     }
-
     next();
   } catch (err) {
     console.error("❌ [guardNoDuplicateAadhar]", err.message);

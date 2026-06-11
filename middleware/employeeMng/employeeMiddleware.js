@@ -57,22 +57,24 @@ const FILE_SIZE_LIMIT = 5 * 1024 * 1024; // 5 MB
 
 /**
  * For POST /api/employees  — photo + aadharCard + panCard + bankPassbook
+ * Field names MUST match exactly what employeeRepository.buildEmployeeFormData()
+ * appends to FormData (all camelCase).
  */
 const _uploadMultiFields = multer({
   storage,
   limits: { fileSize: FILE_SIZE_LIMIT },
   fileFilter: imageAndPdfFilter,
 }).fields([
-  { name: "id_photo", maxCount: 1 },
-  { name: "aadhar_card", maxCount: 1 },
-  { name: "pan_card", maxCount: 1 },
-  { name: "bank_passbook", maxCount: 1 },
+  { name: "idPhoto", maxCount: 1 }, // was: id_photo
+  { name: "aadharCard", maxCount: 1 }, // was: aadhar_card
+  { name: "panCard", maxCount: 1 }, // was: pan_card
+  { name: "bankPassbook", maxCount: 1 }, // was: bank_passbook
   { name: "resume", maxCount: 1 },
-  { name: "medical_certificate", maxCount: 1 },
-  { name: "academic_records", maxCount: 1 },
+  { name: "medicalCertificate", maxCount: 1 }, // was: medical_certificate
+  { name: "academicRecords", maxCount: 1 }, // was: academic_records
   { name: "payslip", maxCount: 1 },
-  { name: "other_certificates", maxCount: 1 },
-  { name: "farm_to_cli", maxCount: 1 },
+  { name: "otherCertificates", maxCount: 1 }, // was: other_certificates
+  { name: "farmToCli", maxCount: 1 }, // was: farm_to_cli
 ]);
 
 /**

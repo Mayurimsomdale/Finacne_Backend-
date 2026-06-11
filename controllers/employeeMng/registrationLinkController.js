@@ -4,85 +4,94 @@
 // All middleware (auth, validation, link loading) runs before these handlers.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { v4 as uuidv4 }              from 'uuid';
-import pool                           from '../../config/database.js';
-import { sendRegistrationLinkEmail }  from '../../services/emailService.js';
+import { v4 as uuidv4 } from "uuid";
+import pool from "../../config/database.js";
+import { sendRegistrationLinkEmail } from "../../services/emailService.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const buildPrefillData = (row) => ({
   // Personal
-  firstName:                row.first_name,
-  lastName:                 row.last_name,
-  fatherHusbandName:        row.father_husband_name,
-  dob:                      row.date_of_birth
-                              ? new Date(row.date_of_birth).toISOString().split('T')[0]
-                              : '',
-  gender:                   row.gender,
-  maritalStatus:            row.marital_status,
+  firstName: row.first_name,
+  lastName: row.last_name,
+  fatherHusbandName: row.father_husband_name,
+  dob: row.date_of_birth
+    ? new Date(row.date_of_birth).toISOString().split("T")[0]
+    : "",
+  gender: row.gender,
+  maritalStatus: row.marital_status,
   educationalQualification: row.educational_qualification,
-  bloodGroup:               row.blood_group,
-  panNumber:                row.pan_number,
-  nameOnPan:                row.name_on_pan,
-  aadhar:                   row.aadhar_number,
-  nameOnAadhar:             row.name_on_aadhar,
-  uanNumber:                row.uan_number || '',
+  bloodGroup: row.blood_group,
+  panNumber: row.pan_number,
+  nameOnPan: row.name_on_pan,
+  aadhar: row.aadhar_number,
+  nameOnAadhar: row.name_on_aadhar,
+  uanNumber: row.uan_number || "",
   // Contact
-  email:                    row.emp_email   ?? row.email,
-  phone:                    row.phone,
-  altPhone:                 row.alt_phone,
+  email: row.emp_email ?? row.email,
+  phone: row.phone,
+  altPhone: row.alt_phone,
   // Permanent address
-  permanentAddress:         row.permanent_address,
-  permanentPhone:           row.permanent_phone,
-  permanentLandmark:        row.permanent_landmark,
-  permanentLatLong:         row.permanent_lat_long,
+  permanentAddress: row.permanent_address,
+  permanentPhone: row.permanent_phone,
+  permanentLandmark: row.permanent_landmark,
+  permanentLatLong: row.permanent_lat_long,
   // Local address
-  localSameAsPermanent:     row.local_same_as_permanent,
-  localAddress:             row.local_address,
-  localPhone:               row.local_phone,
-  localLandmark:            row.local_landmark,
-  localLatLong:             row.local_lat_long,
+  localSameAsPermanent: row.local_same_as_permanent,
+  localAddress: row.local_address,
+  localPhone: row.local_phone,
+  localLandmark: row.local_landmark,
+  localLatLong: row.local_lat_long,
   // Family
-  familyMemberName:         row.family_member_name,
-  familyContactNo:          row.family_contact_no,
-  familyWorkingStatus:      row.family_working_status,
-  familyEmployerName:       row.family_employer_name,
-  familyEmployerContact:    row.family_employer_contact,
+  familyMemberName: row.family_member_name,
+  familyContactNo: row.family_contact_no,
+  familyWorkingStatus: row.family_working_status,
+  familyEmployerName: row.family_employer_name,
+  familyEmployerContact: row.family_employer_contact,
   // Emergency
-  emergencyContactName:     row.emergency_contact_name,
-  emergencyContactNo:       row.emergency_contact_no,
-  emergencyContactAddress:  row.emergency_contact_address,
+  emergencyContactName: row.emergency_contact_name,
+  emergencyContactNo: row.emergency_contact_no,
+  emergencyContactAddress: row.emergency_contact_address,
   emergencyContactRelation: row.emergency_contact_relation,
   // References
-  ref1Name:         row.ref1_name,    ref1Designation:  row.ref1_designation,
-  ref1Organization: row.ref1_organization, ref1Address:  row.ref1_address,
-  ref1CityStatePin: row.ref1_city_state_pin, ref1ContactNo: row.ref1_contact_no,
-  ref1Email:        row.ref1_email,
-  ref2Name:         row.ref2_name,    ref2Designation:  row.ref2_designation,
-  ref2Organization: row.ref2_organization, ref2Address:  row.ref2_address,
-  ref2CityStatePin: row.ref2_city_state_pin, ref2ContactNo: row.ref2_contact_no,
-  ref2Email:        row.ref2_email,
-  ref3Name:         row.ref3_name,    ref3Designation:  row.ref3_designation,
-  ref3Organization: row.ref3_organization, ref3Address:  row.ref3_address,
-  ref3CityStatePin: row.ref3_city_state_pin, ref3ContactNo: row.ref3_contact_no,
-  ref3Email:        row.ref3_email,
+  ref1Name: row.ref1_name,
+  ref1Designation: row.ref1_designation,
+  ref1Organization: row.ref1_organization,
+  ref1Address: row.ref1_address,
+  ref1CityStatePin: row.ref1_city_state_pin,
+  ref1ContactNo: row.ref1_contact_no,
+  ref1Email: row.ref1_email,
+  ref2Name: row.ref2_name,
+  ref2Designation: row.ref2_designation,
+  ref2Organization: row.ref2_organization,
+  ref2Address: row.ref2_address,
+  ref2CityStatePin: row.ref2_city_state_pin,
+  ref2ContactNo: row.ref2_contact_no,
+  ref2Email: row.ref2_email,
+  ref3Name: row.ref3_name,
+  ref3Designation: row.ref3_designation,
+  ref3Organization: row.ref3_organization,
+  ref3Address: row.ref3_address,
+  ref3CityStatePin: row.ref3_city_state_pin,
+  ref3ContactNo: row.ref3_contact_no,
+  ref3Email: row.ref3_email,
   // Employment
-  department:       row.department,
-  position:         row.position,
-  joiningDate:      row.joining_date
-                      ? new Date(row.joining_date).toISOString().split('T')[0]
-                      : '',
-  employmentType:   row.employment_type,
+  department: row.department,
+  position: row.position,
+  joiningDate: row.joining_date
+    ? new Date(row.joining_date).toISOString().split("T")[0]
+    : "",
+  employmentType: row.employment_type,
   reportingManager: row.reporting_manager,
-  circle:           row.circle,
-  projectName:      row.project_name,
+  circle: row.circle,
+  projectName: row.project_name,
   // Bank
-  bankName:          row.bank_name,
-  accountNumber:     row.account_number,
-  ifscCode:          row.ifsc_code,
+  bankName: row.bank_name,
+  accountNumber: row.account_number,
+  ifscCode: row.ifsc_code,
   accountHolderName: row.account_holder_name,
-  bankBranch:        row.bank_branch,
+  bankBranch: row.bank_branch,
   // Meta
-  oldEmployeeId:     row.old_employee_id ?? row.employee_id,
+  oldEmployeeId: row.old_employee_id ?? row.employee_id,
 });
 
 // =============================================================================
@@ -94,11 +103,11 @@ export const generateLink = async (req, res) => {
   const { employeeEmail, expiresInDays } = req.body;
   const adminId = req.admin.id;
 
-  const linkId    = uuidv4();
+  const linkId = uuidv4();
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + expiresInDays);
 
-  const FRONTEND_URL    = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
   const registrationUrl = `${FRONTEND_URL}/registration/${linkId}`;
 
   const client = await pool.connect();
@@ -107,22 +116,26 @@ export const generateLink = async (req, res) => {
       `INSERT INTO registration_links
          (link_id, employee_email, expires_at, status, is_used, created_by)
        VALUES ($1, $2, $3, 'active', false, $4)`,
-      [linkId, employeeEmail, expiresAt, adminId]
+      [linkId, employeeEmail, expiresAt, adminId],
     );
 
-    console.log(`🔗 [generateLink] ${linkId} → "${employeeEmail}" by admin ${adminId}`);
+    console.log(
+      `🔗 [generateLink] ${linkId} → "${employeeEmail}" by admin ${adminId}`,
+    );
 
     // Fire-and-forget email
     sendRegistrationLinkEmail({
-      to:              employeeEmail,
-      toName:          employeeEmail,
+      to: employeeEmail,
+      toName: employeeEmail,
       registrationUrl,
-      expiresAt:       expiresAt.toISOString(),
-    }).catch((err) => console.error('Registration link email failed:', err.message));
+      expiresAt: expiresAt.toISOString(),
+    }).catch((err) =>
+      console.error("Registration link email failed:", err.message),
+    );
 
     return res.status(201).json({
       success: true,
-      message: 'Registration link generated and emailed successfully.',
+      message: "Registration link generated and emailed successfully.",
       data: {
         linkId,
         employeeEmail,
@@ -131,7 +144,7 @@ export const generateLink = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error('❌ [generateLink]', err.message);
+    console.error("❌ [generateLink]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -157,7 +170,7 @@ export const listLinks = async (_req, res) => {
 
     return res.json({ success: true, count: rows.length, data: rows });
   } catch (err) {
-    console.error('❌ [listLinks]', err.message);
+    console.error("❌ [listLinks]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -174,36 +187,75 @@ export const validateLink = async (req, res) => {
 
   let prefillData = null;
 
-  // For rejoin links: fetch the employee row and build prefill object
+  // For rejoin links: fetch the employee row and build prefill object.
+  // Prefer rejoin_snapshot (saved at invite time) so prefill always reflects
+  // the original data even if the live row was partially modified.
   if (link.is_rejoin && link.prefill_employee_id) {
     const client = await pool.connect();
     try {
       const { rows } = await client.query(
-        `SELECT * FROM employees WHERE id = $1`,
-        [link.prefill_employee_id]
+        `SELECT *, rejoin_snapshot FROM employees WHERE id = $1`,
+        [Number(link.prefill_employee_id)],
+      );
+
+      console.log(
+        `[validateLink] rejoin prefill fetch — prefill_employee_id=${link.prefill_employee_id}, found=${rows.length > 0}`,
       );
 
       if (rows[0]) {
-        prefillData = buildPrefillData(rows[0]);
+        // Use rejoin_snapshot if available — it was saved at invite time and
+        // contains the exact data we want to prefill. Fall back to live row.
+        let sourceRow = rows[0];
+        if (rows[0].rejoin_snapshot) {
+          try {
+            const snap =
+              typeof rows[0].rejoin_snapshot === "string"
+                ? JSON.parse(rows[0].rejoin_snapshot)
+                : rows[0].rejoin_snapshot;
+            // Merge snapshot onto live row so buildPrefillData gets all fields.
+            // Snapshot keys are snake_case matching DB columns.
+            sourceRow = { ...rows[0], ...snap };
+            console.log(
+              `[validateLink] using rejoin_snapshot for prefill — firstName=${snap.first_name}`,
+            );
+          } catch (snapErr) {
+            console.warn(
+              "[validateLink] rejoin_snapshot parse failed, falling back to live row:",
+              snapErr.message,
+            );
+          }
+        }
+        prefillData = buildPrefillData(sourceRow);
+        console.log(
+          `[validateLink] prefillData built — firstName=${prefillData.firstName}, email=${prefillData.email}, aadhar=${prefillData.aadhar}`,
+        );
+      } else {
+        console.warn(
+          `[validateLink] ⚠️  No employee found for prefill_employee_id=${link.prefill_employee_id}`,
+        );
       }
     } catch (err) {
-      console.error('❌ [validateLink] prefill fetch failed:', err.message);
-      // non-fatal — return valid link without prefill
+      console.error("❌ [validateLink] prefill fetch failed:", err.message);
     } finally {
       client.release();
     }
   }
 
+  // prefillData is returned at BOTH top level AND inside data{}
+  // so the RegistrationForm can read it as response.prefillData
+  // OR response.data.prefillData — whichever it uses.
   return res.json({
-    success:     true,
-    valid:       true,
-    isRejoin:    link.is_rejoin || false,
-    prefillData,
-    linkEmail:   link.employee_email || null,
+    success: true,
+    valid: true,
+    isRejoin: link.is_rejoin || false,
+    prefillData, // top-level access
+    linkEmail: link.employee_email || null,
     data: {
-      linkId:        link.link_id,
+      linkId: link.link_id,
       employeeEmail: link.employee_email || null,
-      expiresAt:     link.expires_at,
+      expiresAt: link.expires_at,
+      isRejoin: link.is_rejoin || false,
+      prefillData, // also nested under data{} as fallback
     },
   });
 };
@@ -219,23 +271,27 @@ export const deleteLink = async (req, res) => {
       `DELETE FROM registration_links
        WHERE link_id = $1 OR id::text = $1
        RETURNING *`,
-      [req.params.linkId]
+      [req.params.linkId],
     );
 
     // loadLinkByParam already confirmed it exists, but guard anyway
     if (!rows[0]) {
-      return res.status(404).json({ success: false, message: 'Registration link not found.' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Registration link not found." });
     }
 
-    console.log(`🗑️  [deleteLink] ${req.params.linkId} deleted by admin ${req.admin.id}`);
+    console.log(
+      `🗑️  [deleteLink] ${req.params.linkId} deleted by admin ${req.admin.id}`,
+    );
 
     return res.json({
       success: true,
-      message: 'Registration link deleted successfully.',
-      data:    rows[0],
+      message: "Registration link deleted successfully.",
+      data: rows[0],
     });
   } catch (err) {
-    console.error('❌ [deleteLink]', err.message);
+    console.error("❌ [deleteLink]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();

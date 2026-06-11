@@ -7,6 +7,71 @@ import { uploadFileToS3, deleteFileFromS3, getS3Url } from "../../utills/s3.js";
 
 const __filename = fileURLToPath(import.meta.url);
 
+// ── resolveDocUrls ────────────────────────────────────────────────────────────
+// Converts raw S3 keys stored in employee_documents.file_path into presigned
+// (or public) URLs so the frontend can display them directly.
+// Also resolves the id_photo_url column (direct employee column) as a fallback.
+// Called on every endpoint that returns employees with their documents array.
+//
+// FIX: pg may return json_agg result as a JSON string instead of a parsed
+// array in some configurations — always parse defensively.
+// FIX: If no photo row exists in documents[] (e.g. employee_documents table
+// has no entry yet), inject a synthetic 'photo' entry from id_photo_url so
+// getPhotoUrl() on the frontend always finds the KYE registration photo.
+function resolveDocUrls(rows) {
+  return rows.map((emp) => {
+    // ── Parse documents if pg returned them as a JSON string ─────────────────
+    let rawDocs = emp.documents;
+    if (typeof rawDocs === "string") {
+      try {
+        rawDocs = JSON.parse(rawDocs);
+      } catch (_) {
+        rawDocs = [];
+      }
+    }
+    if (!Array.isArray(rawDocs)) rawDocs = [];
+
+    // ── Resolve S3 keys → URLs for every document ────────────────────────────
+    const resolvedDocs = rawDocs.map((doc) => ({
+      ...doc,
+      file_path: doc.file_path ? getS3Url(doc.file_path) : doc.file_path,
+    }));
+
+    // ── Resolve id_photo_url column ───────────────────────────────────────────
+    let resolvedIdPhotoUrl = emp.id_photo_url || null;
+    if (resolvedIdPhotoUrl && !String(resolvedIdPhotoUrl).startsWith("http")) {
+      resolvedIdPhotoUrl = getS3Url(resolvedIdPhotoUrl);
+    }
+
+    // ── Inject synthetic photo document from id_photo_url as a guaranteed ────
+    // fallback when employee_documents has no photo row.
+    // This covers KYE-registered employees whose photo was saved only in
+    // employees.id_photo_url and not yet mirrored into employee_documents.
+    const photoTypes = new Set(["photo", "idPhoto", "id_photo"]);
+    // FIX: only treat a photo doc as "present" if it has a usable file_path.
+    // A row with document_type='photo' but null/empty file_path must NOT block
+    // the id_photo_url fallback from being injected.
+    const hasPhotoDoc = resolvedDocs.some(
+      (d) => photoTypes.has(d.document_type) && d.file_path,
+    );
+    if (!hasPhotoDoc && resolvedIdPhotoUrl) {
+      resolvedDocs.unshift({
+        id: 0,
+        document_type: "photo",
+        file_path: resolvedIdPhotoUrl,
+        file_name: "id_photo.jpg",
+        mime_type: "image/jpeg",
+      });
+    }
+
+    return {
+      ...emp,
+      documents: resolvedDocs,
+      id_photo_url: resolvedIdPhotoUrl,
+    };
+  });
+}
+
 const EMPLOYEE_DOCS_FOLDER = "uploads/employee_docs";
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -37,16 +102,25 @@ async function generateEmployeeId(client) {
   return `${prefix}${String(nextSeq).padStart(4, "0")}`;
 }
 
-async function saveDocument(client, empDbId, type, file) {
-  if (!file) return null;
-  const { key } = await uploadFileToS3(file, EMPLOYEE_DOCS_FOLDER);
+/**
+ * saveDocument — inserts a row into employee_documents using a key that was
+ * already uploaded to S3. Does NOT re-upload.
+ *
+ * @param {object} client   - pg client
+ * @param {number} empDbId  - employees.id
+ * @param {string} type     - document_type label
+ * @param {object} file     - multer file object (for originalname/size/mimetype)
+ * @param {string} s3Key    - the S3 key returned by a previous uploadFileToS3 call
+ */
+async function saveDocument(client, empDbId, type, file, s3Key) {
+  if (!file || !s3Key) return null;
   await client.query(
     `INSERT INTO employee_documents
        (employee_id, document_type, file_path, file_name, file_size, mime_type)
      VALUES ($1, $2, $3, $4, $5, $6)`,
-    [empDbId, type, key, file.originalname, file.size, file.mimetype],
+    [empDbId, type, s3Key, file.originalname, file.size, file.mimetype],
   );
-  return key;
+  return s3Key;
 }
 
 function extractErrorMessage(err) {
@@ -340,17 +414,67 @@ const EMP_SELECT = `
     COALESCE(e.other_allowances, 0) AS other_allowances,
     COALESCE(e.basic_salary, 0) + COALESCE(e.hra, 0) + COALESCE(e.other_allowances, 0) AS total_salary,
     e.docs_submitted, e.docs_submitted_at, e.created_at, e.updated_at,
+    e.id_photo_url,
+    -- Merges three sources so the ID card always finds the photo regardless of
+    -- which flow created the employee:
+    --   1. employee_documents  (admin-uploaded docs + ID card modal uploads)
+    --   2. id_photo_url column (KYE registration form — stored as raw S3 key)
+    --      synthesised as a virtual 'photo' document when no photo row exists
+    --      in employee_documents, so getPhotoUrl() on the frontend finds it.
+    --   3. employee_submitted_docs (doc-portal uploads with photo-like types)
+    --      kept as a final fallback for legacy/edge-case data.
+    -- Priority: employee_documents photo > id_photo_url column > employee_submitted_docs.
     COALESCE(
-      json_agg(
-        json_build_object(
-          'id', d.id, 'document_type', d.document_type,
-          'file_path', d.file_path, 'file_name', d.file_name, 'mime_type', d.mime_type
-        )
-      ) FILTER (WHERE d.id IS NOT NULL),
+      (
+        SELECT json_agg(row_to_json(combined))
+        FROM (
+          -- ── Source 1: All admin-uploaded / ID-card-modal documents ──────────
+          SELECT d.id, d.document_type, d.file_path, d.file_name, d.mime_type
+          FROM employee_documents d
+          WHERE d.employee_id = e.id
+
+          UNION ALL
+
+          -- ── Source 2: KYE registration photo via id_photo_url column ────────
+          -- The KYE form stores the S3 key in employees.id_photo_url.
+          -- Synthesise it as a 'photo' document so getPhotoUrl() picks it up
+          -- when there is no matching row in employee_documents yet.
+          SELECT
+            0                    AS id,
+            'photo'              AS document_type,
+            e.id_photo_url       AS file_path,
+            'id_photo.jpg'       AS file_name,
+            'image/jpeg'         AS mime_type
+          WHERE e.id_photo_url IS NOT NULL
+            AND e.id_photo_url <> ''
+            AND NOT EXISTS (
+              SELECT 1 FROM employee_documents d2
+              WHERE d2.employee_id = e.id
+                AND d2.document_type IN ('photo', 'idPhoto', 'id_photo')
+                AND d2.file_path IS NOT NULL
+                AND d2.file_path <> ''
+            )
+
+          UNION ALL
+
+          -- ── Source 3: doc-portal uploads with photo-like types (legacy) ─────
+          SELECT sd.id, sd.document_type, sd.file_path, sd.file_name, sd.mime_type
+          FROM employee_submitted_docs sd
+          WHERE sd.employee_id = e.id
+            AND sd.document_type IN ('idPhoto', 'id_photo', 'photo')
+            AND NOT EXISTS (
+              SELECT 1 FROM employee_documents d2
+              WHERE d2.employee_id = e.id
+                AND d2.document_type IN ('photo', 'idPhoto', 'id_photo')
+                AND d2.file_path IS NOT NULL
+                AND d2.file_path <> ''
+            )
+            AND (e.id_photo_url IS NULL OR e.id_photo_url = '')
+        ) combined
+      ),
       '[]'::json
     ) AS documents
   FROM employees e
-  LEFT JOIN employee_documents d ON d.employee_id = e.id
 `;
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -392,39 +516,43 @@ export async function getPendingRejoinCount(req, res) {
     );
     return res.json({ success: true, count: parseInt(rows[0].count, 10) });
   } catch (err) {
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to fetch pending rejoin count",
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch pending rejoin count",
+    });
   }
 }
 
 export async function getAll(req, res) {
   try {
     const { rows } = await pool.query(
-      `${EMP_SELECT} WHERE e.status NOT IN ('pending','pending_rejoin') GROUP BY e.id ORDER BY e.created_at DESC`,
+      `${EMP_SELECT} WHERE e.status NOT IN ('pending','pending_rejoin') ORDER BY e.created_at DESC`,
     );
-    return res.json({ success: true, count: rows.length, data: rows });
+    return res.json({
+      success: true,
+      count: rows.length,
+      data: resolveDocUrls(rows),
+    });
   } catch (err) {
     console.error("[getAll]", err.message);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to fetch employees",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch employees",
+      detail: err.message,
+    });
   }
 }
 
 export async function getPendingRejoin(req, res) {
   try {
     const { rows } = await pool.query(
-      `${EMP_SELECT} WHERE e.status = 'pending_rejoin' GROUP BY e.id ORDER BY e.updated_at DESC`,
+      `${EMP_SELECT} WHERE e.status = 'pending_rejoin' ORDER BY e.updated_at DESC`,
     );
-    return res.json({ success: true, count: rows.length, data: rows });
+    return res.json({
+      success: true,
+      count: rows.length,
+      data: resolveDocUrls(rows),
+    });
   } catch (err) {
     console.error("[getPendingRejoin]", err.message);
     return res.status(500).json({ success: false, message: err.message });
@@ -456,13 +584,11 @@ export async function getActivityLog(req, res) {
     });
   } catch (err) {
     console.error("[getActivityLog]", err.message);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to fetch activity log",
-        detail: err.message,
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch activity log",
+      detail: err.message,
+    });
   }
 }
 
@@ -482,7 +608,7 @@ export async function cleanupExpiredRejoinInvites(req, res) {
       });
 
     const { sendRejoinInviteExpiredEmail } =
-      await import("../services/emailService.js").catch(() => ({
+      await import("../../services/emailService.js").catch(() => ({
         sendRejoinInviteExpiredEmail: null,
       }));
 
@@ -815,14 +941,14 @@ export async function exportData(req, res) {
 export async function getById(req, res) {
   try {
     const { rows } = await pool.query(
-      `${EMP_SELECT} WHERE e.id::text=$1 OR e.employee_id=$1 GROUP BY e.id`,
+      `${EMP_SELECT} WHERE e.id::text=$1 OR e.employee_id=$1`,
       [String(req.params.id)],
     );
     if (rows.length === 0)
       return res
         .status(404)
         .json({ success: false, message: "Employee not found" });
-    return res.json({ success: true, data: rows[0] });
+    return res.json({ success: true, data: resolveDocUrls(rows)[0] });
   } catch (err) {
     console.error("[getById]", err.message);
     return res
@@ -861,7 +987,8 @@ export async function createEmployee(req, res) {
     if (!b.gender) missing.push("Gender");
     if (!b.joiningDate) missing.push("Joining Date");
     if (!b.department) missing.push("Department");
-    if (!b.designation?.trim()) missing.push("Designation");
+    if (!b.position?.trim() && !b.designation?.trim())
+      missing.push("Designation");
     if (!b.employmentType) missing.push("Employment Type");
     if (!b.bankName?.trim()) missing.push("Bank Name");
     if (!b.accountNumber?.trim()) missing.push("Account Number");
@@ -875,12 +1002,12 @@ export async function createEmployee(req, res) {
       });
     }
 
-    if (!files.id_photo?.[0]) {
+    if (!files.idPhoto?.[0]) {
       await client.query("ROLLBACK");
       return res.status(400).json({
         success: false,
         message:
-          "Employee photo is required. Make sure the photo field is named 'id_photo'.",
+          "Employee photo is required. Make sure the photo field is named 'idPhoto'.",
       });
     }
 
@@ -890,157 +1017,54 @@ export async function createEmployee(req, res) {
       eid && eid !== "Loading..." ? eid : await generateEmployeeId(client);
     console.log("[createEmployee] employeeId:", employeeId);
 
-    // ── Upload files to S3 ────────────────────────────────────────────────────
-    console.log("[createEmployee] uploading id_photo to S3...");
-    let id_photo_upload;
+    // ── Upload files to S3 (all in parallel) ─────────────────────────────────
+    // Field names are camelCase to match employeeRepository.buildEmployeeFormData().
+    console.log("[createEmployee] uploading files to S3...");
+    let id_photo_url,
+      aadhar_card_url = null,
+      pan_card_url = null,
+      bank_passbook_url = null,
+      resume_url = null,
+      pay_slip_url = null,
+      other_certificates_url = null,
+      medical_certificate_url = null,
+      academic_records_url = null,
+      farm_to_cli_certificate_url = null;
+
     try {
-      id_photo_upload = await uploadFileToS3(
-        files.id_photo[0],
-        EMPLOYEE_DOCS_FOLDER,
-      );
+      const upload = async (fieldName) => {
+        const file = files[fieldName]?.[0];
+        if (!file) return null;
+        const { key } = await uploadFileToS3(file, EMPLOYEE_DOCS_FOLDER);
+        uploadedKeys.push(key);
+        return key;
+      };
+
+      [
+        id_photo_url,
+        aadhar_card_url,
+        pan_card_url,
+        bank_passbook_url,
+        resume_url,
+        pay_slip_url,
+        other_certificates_url,
+        medical_certificate_url,
+        academic_records_url,
+        farm_to_cli_certificate_url,
+      ] = await Promise.all([
+        upload("idPhoto"), // required — already validated above
+        upload("aadharCard"),
+        upload("panCard"),
+        upload("bankPassbook"),
+        upload("resume"),
+        upload("payslip"),
+        upload("otherCertificates"),
+        upload("medicalCertificate"),
+        upload("academicRecords"),
+        upload("farmToCli"),
+      ]);
     } catch (s3Err) {
-      throw new Error(
-        `S3 upload failed for id_photo: ${extractErrorMessage(s3Err)}`,
-      );
-    }
-    const id_photo_url = id_photo_upload.key;
-    uploadedKeys.push(id_photo_url);
-    console.log("[createEmployee] id_photo uploaded:", id_photo_url);
-
-    let aadhar_card_url = null;
-    if (files.aadhar_card?.[0]) {
-      try {
-        const r = await uploadFileToS3(
-          files.aadhar_card[0],
-          EMPLOYEE_DOCS_FOLDER,
-        );
-        aadhar_card_url = r.key;
-        uploadedKeys.push(aadhar_card_url);
-        console.log("[createEmployee] aadhar_card uploaded:", aadhar_card_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for aadhar_card: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let pan_card_url = null;
-    if (files.pan_card?.[0]) {
-      try {
-        const r = await uploadFileToS3(files.pan_card[0], EMPLOYEE_DOCS_FOLDER);
-        pan_card_url = r.key;
-        uploadedKeys.push(pan_card_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for pan_card: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let bank_passbook_url = null;
-    if (files.bank_passbook?.[0]) {
-      try {
-        const r = await uploadFileToS3(
-          files.bank_passbook[0],
-          EMPLOYEE_DOCS_FOLDER,
-        );
-        bank_passbook_url = r.key;
-        uploadedKeys.push(bank_passbook_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for bank_passbook: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let resume_url = null;
-    if (files.resume?.[0]) {
-      try {
-        const r = await uploadFileToS3(files.resume[0], EMPLOYEE_DOCS_FOLDER);
-        resume_url = r.key;
-        uploadedKeys.push(resume_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for resume: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let pay_slip_url = null;
-    if (files.payslip?.[0]) {
-      try {
-        const r = await uploadFileToS3(files.payslip[0], EMPLOYEE_DOCS_FOLDER);
-        pay_slip_url = r.key;
-        uploadedKeys.push(pay_slip_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for payslip: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let other_certificates_url = null;
-    if (files.other_certificates?.[0]) {
-      try {
-        const r = await uploadFileToS3(
-          files.other_certificates[0],
-          EMPLOYEE_DOCS_FOLDER,
-        );
-        other_certificates_url = r.key;
-        uploadedKeys.push(other_certificates_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for other_certificates: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let medical_certificate_url = null;
-    if (files.medical_certificate?.[0]) {
-      try {
-        const r = await uploadFileToS3(
-          files.medical_certificate[0],
-          EMPLOYEE_DOCS_FOLDER,
-        );
-        medical_certificate_url = r.key;
-        uploadedKeys.push(medical_certificate_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for medical_certificate: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let academic_records_url = null;
-    if (files.academic_records?.[0]) {
-      try {
-        const r = await uploadFileToS3(
-          files.academic_records[0],
-          EMPLOYEE_DOCS_FOLDER,
-        );
-        academic_records_url = r.key;
-        uploadedKeys.push(academic_records_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for academic_records: ${extractErrorMessage(s3Err)}`,
-        );
-      }
-    }
-
-    let farm_to_cli_certificate_url = null;
-    if (files.farm_to_cli?.[0]) {
-      try {
-        const r = await uploadFileToS3(
-          files.farm_to_cli[0],
-          EMPLOYEE_DOCS_FOLDER,
-        );
-        farm_to_cli_certificate_url = r.key;
-        uploadedKeys.push(farm_to_cli_certificate_url);
-      } catch (s3Err) {
-        throw new Error(
-          `S3 upload failed for farm_to_cli: ${extractErrorMessage(s3Err)}`,
-        );
-      }
+      throw new Error(`S3 upload failed: ${extractErrorMessage(s3Err)}`);
     }
 
     console.log("[createEmployee] all S3 uploads done, inserting into DB...");
@@ -1149,7 +1173,7 @@ export async function createEmployee(req, res) {
         b.accountHolderName?.trim() ||
           `${b.firstName?.trim()} ${b.lastName?.trim()}`, // $65
         b.bankBranch?.trim() || b.branch?.trim() || null, // $66
-        b.designation?.trim(), // $67  → position
+        b.position?.trim() || b.designation?.trim(), // $67  → position (repo sends 'position', legacy sends 'designation')
         b.department, // $68
         b.circle || null, // $69
         b.projectName || null, // $70
@@ -1177,42 +1201,66 @@ export async function createEmployee(req, res) {
     console.log("[createEmployee] employee row inserted, dbId:", dbId);
 
     // ── Save document records in employee_documents ───────────────────────────
+    // We pass the already-uploaded S3 key (not the raw file) so saveDocument
+    // does NOT re-upload to S3 a second time.
     await Promise.all([
+      // id_photo was uploaded above; insert its doc record manually
       client.query(
         `INSERT INTO employee_documents (employee_id, document_type, file_path, file_name, file_size, mime_type)
          VALUES ($1,'photo',$2,$3,$4,$5)`,
         [
           dbId,
           id_photo_url,
-          files.id_photo[0].originalname,
-          files.id_photo[0].size,
-          files.id_photo[0].mimetype,
+          files.idPhoto[0].originalname,
+          files.idPhoto[0].size,
+          files.idPhoto[0].mimetype,
         ],
       ),
-      saveDocument(client, dbId, "aadhar_card", files.aadhar_card?.[0]),
-      saveDocument(client, dbId, "pan_card", files.pan_card?.[0]),
-      saveDocument(client, dbId, "bank_passbook", files.bank_passbook?.[0]),
-      saveDocument(client, dbId, "resume", files.resume?.[0]),
-      saveDocument(client, dbId, "payslip", files.payslip?.[0]),
+      saveDocument(
+        client,
+        dbId,
+        "aadhar_card",
+        files.aadharCard?.[0],
+        aadhar_card_url,
+      ),
+      saveDocument(client, dbId, "pan_card", files.panCard?.[0], pan_card_url),
+      saveDocument(
+        client,
+        dbId,
+        "bank_passbook",
+        files.bankPassbook?.[0],
+        bank_passbook_url,
+      ),
+      saveDocument(client, dbId, "resume", files.resume?.[0], resume_url),
+      saveDocument(client, dbId, "payslip", files.payslip?.[0], pay_slip_url),
       saveDocument(
         client,
         dbId,
         "other_certificates",
-        files.other_certificates?.[0],
+        files.otherCertificates?.[0],
+        other_certificates_url,
       ),
       saveDocument(
         client,
         dbId,
         "medical_certificate",
-        files.medical_certificate?.[0],
+        files.medicalCertificate?.[0],
+        medical_certificate_url,
       ),
       saveDocument(
         client,
         dbId,
         "academic_records",
-        files.academic_records?.[0],
+        files.academicRecords?.[0],
+        academic_records_url,
       ),
-      saveDocument(client, dbId, "farm_to_cli", files.farm_to_cli?.[0]),
+      saveDocument(
+        client,
+        dbId,
+        "farm_to_cli",
+        files.farmToCli?.[0],
+        farm_to_cli_certificate_url,
+      ),
     ]);
 
     await client.query("COMMIT");
@@ -1225,6 +1273,13 @@ export async function createEmployee(req, res) {
     });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
+
+    // Roll back any S3 files already uploaded during this request
+    if (uploadedKeys.length > 0) {
+      Promise.all(uploadedKeys.map((k) => deleteFileFromS3(k))).catch((e) =>
+        console.warn("[createEmployee] S3 rollback error:", e.message),
+      );
+    }
 
     const errMsg = extractErrorMessage(err);
     console.error("[createEmployee] FAILED:", errMsg);
@@ -1350,7 +1405,7 @@ export async function updateEmployee(req, res) {
         b.ref3ContactNo?.trim() || null,
         b.ref3Email?.trim() || null,
         b.department || null,
-        b.designation?.trim() || null,
+        b.position?.trim() || b.designation?.trim() || null,
         b.employmentType || null,
         b.joiningDate || null,
         b.circle || null,
@@ -1374,25 +1429,21 @@ export async function updateEmployee(req, res) {
         .status(404)
         .json({ success: false, message: "Employee not found" });
 
-    const full = await pool.query(`${EMP_SELECT} WHERE e.id=$1 GROUP BY e.id`, [
-      rows[0].id,
-    ]);
+    const full = await pool.query(`${EMP_SELECT} WHERE e.id=$1`, [rows[0].id]);
     console.log(`✅ Employee updated: ${rows[0].employee_id}`);
     return res.json({
       success: true,
       message: "Employee updated successfully",
-      data: full.rows[0],
+      data: resolveDocUrls(full.rows)[0],
     });
   } catch (err) {
     const errMsg = extractErrorMessage(err);
     console.error("[updateEmployee]", errMsg);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to update employee",
-        detail: errMsg,
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update employee",
+      detail: errMsg,
+    });
   }
 }
 
@@ -1494,45 +1545,42 @@ export async function sendStatusNotification(req, res) {
       sendActiveNotificationEmail,
       sendInactiveNotificationEmail,
       sendBlacklistNotificationEmail,
-    } = await import("../services/emailService.js");
-    let result;
-    if (status === "Active")
-      result = await sendActiveNotificationEmail({
-        to: email,
-        firstName,
-        lastName,
-      });
-    else if (status === "Inactive")
-      result = await sendInactiveNotificationEmail({
-        to: email,
-        firstName,
-        lastName,
-        reason,
-      });
-    else if (status === "Blacklist" || status === "Blacklisted")
-      result = await sendBlacklistNotificationEmail({
-        to: email,
-        firstName,
-        lastName,
-        reason,
-      });
-    else
-      return res.json({
-        success: true,
-        message: "No notification email required for this status",
-      });
-    return result.success
-      ? res.json({
-          success: true,
-          message: `Notification email sent to ${email}`,
-        })
-      : res
-          .status(500)
-          .json({
-            success: false,
-            message: "Email dispatch failed",
-            error: result.error,
-          });
+    } = await import("../../services/emailService.js");
+
+    let sent = false;
+    try {
+      if (status === "Active" || status === "active") {
+        await sendActiveNotificationEmail({ to: email, firstName, lastName });
+        sent = true;
+      } else if (status === "Inactive" || status === "inactive") {
+        await sendInactiveNotificationEmail({
+          to: email,
+          firstName,
+          lastName,
+          reason,
+        });
+        sent = true;
+      } else if (status === "Blacklist" || status === "Blacklisted") {
+        await sendBlacklistNotificationEmail({
+          to: email,
+          firstName,
+          lastName,
+          reason,
+        });
+        sent = true;
+      }
+    } catch (emailErr) {
+      // Log the real SMTP/service error but do NOT surface it to the frontend.
+      // The status change is already saved in the DB — email failure is non-fatal.
+      console.error("[sendStatusNotification] Email failed:", emailErr.message);
+    }
+
+    return res.json({
+      success: true,
+      message: sent
+        ? `Notification email sent to ${email}`
+        : "No notification email required for this status",
+    });
   } catch (err) {
     console.error("[sendStatusNotification]", err.message);
     return res
@@ -1540,7 +1588,6 @@ export async function sendStatusNotification(req, res) {
       .json({ success: false, message: "Failed to send notification" });
   }
 }
-
 export async function getHistory(req, res) {
   const { id } = req.params;
   try {
@@ -1628,22 +1675,33 @@ export async function uploadPhoto(req, res) {
        RETURNING id, document_type, file_path, file_name, mime_type`,
       [empDbId, key, req.file.originalname, req.file.size, req.file.mimetype],
     );
+    // Also update id_photo_url column so KYE fallback path stays in sync.
+    // This ensures both the documents[] array AND id_photo_url always reflect
+    // the latest photo regardless of which upload path was used.
+    await client.query(
+      `UPDATE employees SET id_photo_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [key, empDbId],
+    );
     await client.query("COMMIT");
+    // Resolve the S3 key to a usable URL before sending back to the frontend.
+    // The ID card modal reads data.file_path to update dbPhotoUrl immediately.
+    const doc = rows[0];
     return res.json({
       success: true,
       message: "Photo uploaded successfully",
-      data: rows[0],
+      data: {
+        ...doc,
+        file_path: getS3Url(doc.file_path),
+      },
     });
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("[uploadPhoto]", err.message);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to save photo",
-        detail: extractErrorMessage(err),
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to save photo",
+      detail: extractErrorMessage(err),
+    });
   } finally {
     client.release();
   }
@@ -1724,13 +1782,11 @@ export async function uploadDocument(req, res) {
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("[uploadDocument]", err.message);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to save document",
-        detail: extractErrorMessage(err),
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to save document",
+      detail: extractErrorMessage(err),
+    });
   } finally {
     client.release();
   }
@@ -1773,13 +1829,11 @@ export async function deleteDocument(req, res) {
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("[deleteDocument]", err.message);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to delete document",
-        detail: extractErrorMessage(err),
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete document",
+      detail: extractErrorMessage(err),
+    });
   } finally {
     client.release();
   }
@@ -1803,30 +1857,24 @@ export async function sendRejoinInvite(req, res) {
         .status(409)
         .json({ success: false, message: "Employee is currently active." });
     if (emp.status === "blacklisted" || emp.status === "Blacklist")
-      return res
-        .status(403)
-        .json({
-          success: false,
-          message: "Blacklisted employees cannot be invited to rejoin.",
-        });
+      return res.status(403).json({
+        success: false,
+        message: "Blacklisted employees cannot be invited to rejoin.",
+      });
     if (!emp.email)
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Employee has no email address on record.",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Employee has no email address on record.",
+      });
     const { rows: existingLinks } = await client.query(
       `SELECT id FROM registration_links WHERE employee_email=$1 AND is_used=false AND expires_at>CURRENT_TIMESTAMP AND is_rejoin=true`,
       [emp.email],
     );
     if (existingLinks[0])
-      return res
-        .status(409)
-        .json({
-          success: false,
-          message: "A rejoin invite was already sent and is still valid.",
-        });
+      return res.status(409).json({
+        success: false,
+        message: "A rejoin invite was already sent and is still valid.",
+      });
     const snapshot = buildSnapshot(emp);
     const { v4: uuidv4 } = await import("uuid");
     const linkId = uuidv4();
@@ -1845,16 +1893,31 @@ export async function sendRejoinInvite(req, res) {
       [JSON.stringify(snapshot), linkId, emp.id],
     );
     await client.query("COMMIT");
-    const { sendRejoinInvitationEmail } =
-      await import("../services/emailService.js");
-    await sendRejoinInvitationEmail({
-      to: emp.email,
-      firstName: emp.first_name,
-      lastName: emp.last_name,
-      employeeId: emp.employee_id,
-      registrationUrl,
-      expiresAt: expiresAt.toISOString(),
+
+    // ── Fire-and-forget: email errors must NOT roll back or fail the request ──
+    // The DB is already committed; the link is valid. If email fails the admin
+    // can resend manually. This matches the pattern in registrationController.js.
+    setImmediate(async () => {
+      try {
+        const { sendRejoinInvitationEmail } =
+          await import("../../services/emailService.js");
+        await sendRejoinInvitationEmail({
+          to: emp.email,
+          firstName: emp.first_name,
+          lastName: emp.last_name,
+          employeeId: emp.employee_id,
+          registrationUrl,
+          expiresAt: expiresAt.toISOString(),
+        });
+        console.log(`✅ [sendRejoinInvite] Email sent to ${emp.email}`);
+      } catch (emailErr) {
+        console.error(
+          "[sendRejoinInvite] Email failed (link still valid):",
+          emailErr.message,
+        );
+      }
     });
+
     return res.json({
       success: true,
       message: `Rejoin invitation sent to ${emp.email}`,
@@ -1895,7 +1958,7 @@ export async function cancelPendingRejoin(req, res) {
       [emp.email],
     );
     await client.query("COMMIT");
-    const emailMod = await import("../services/emailService.js").catch(
+    const emailMod = await import("../../services/emailService.js").catch(
       () => null,
     );
     if (emailMod?.sendRejoinCancelledEmail && emp.email) {

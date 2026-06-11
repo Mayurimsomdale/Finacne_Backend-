@@ -2,42 +2,40 @@
 // All business logic, DB queries, and file operations for employee-doc routes.
 // Each export maps 1-to-1 with a route in employeeDocUploadRoutes.js.
 
-import path   from 'path';
-import fs     from 'fs';
-import crypto from 'crypto';
-import pool from '../../config/database.js';
+import crypto from "crypto";
+import pool from "../../config/database.js";
 
-import {
-  PROJECT_ROOT,
-  cleanupFiles
-} from '../../middleware/employeeMng/employeeDocMiddleware.js';
+import { cleanupFiles } from "../../middleware/employeeMng/employeeDocMiddleware.js";
+
+import { uploadFileToS3, deleteFileFromS3 } from "../../utills/s3.js";
+
+const S3_FOLDER_SUBMITTED = "uploads/employee_submitted_docs";
+const S3_FOLDER_HR = "uploads/employee_hr_docs";
 
 import {
   sendHRDocSubmissionNotification,
   sendDocAcceptanceEmail,
   sendDocRejectionEmail,
-} from '../../services/emailService.js';
+} from "../../services/emailService.js";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // PRIVATE HELPERS
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Inserts a row into employee_submitted_docs and returns its id.
+ * Uploads a multer memoryStorage file to S3, then inserts a row into
+ * employee_submitted_docs.  Returns the new row id.
  */
 async function saveDoc(client, empDbId, tokenId, type, file) {
   if (!file) return null;
+  const { key } = await uploadFileToS3(file, S3_FOLDER_SUBMITTED);
   const { rows } = await client.query(
     `INSERT INTO employee_submitted_docs
        (employee_id, upload_token_id, document_type,
         file_path, file_name, file_size, mime_type, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
      RETURNING id`,
-    [
-      empDbId, tokenId, type,
-      `/uploads/employee_submitted_docs/${file.filename}`,
-      file.originalname, file.size, file.mimetype,
-    ]
+    [empDbId, tokenId, type, key, file.originalname, file.size, file.mimetype],
   );
   return rows[0].id;
 }
@@ -47,19 +45,19 @@ async function saveDoc(client, empDbId, tokenId, type, file) {
  * and returns { token, expiresAt }.
  */
 async function generateFreshUploadToken(client, empDbId, empPublicId) {
-  const token     = crypto.randomBytes(32).toString('hex');
+  const token = crypto.randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
   await client.query(
     `INSERT INTO employee_doc_upload_tokens
        (token, employee_id, employee_emp_id, expires_at)
      VALUES ($1, $2, $3, $4)`,
-    [token, empDbId, empPublicId, expiresAt]
+    [token, empDbId, empPublicId, expiresAt],
   );
 
   await client.query(
     `UPDATE employees SET active_doc_upload_token=$1 WHERE id=$2`,
-    [token, empDbId]
+    [token, empDbId],
   );
 
   return { token, expiresAt };
@@ -68,7 +66,7 @@ async function generateFreshUploadToken(client, empDbId, empPublicId) {
 /**
  * Resolves the FRONTEND_URL env var with a safe fallback.
  */
-const frontendUrl = () => process.env.FRONTEND_URL || 'http://localhost:3000';
+const frontendUrl = () => process.env.FRONTEND_URL || "http://localhost:3000";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // CONTROLLER EXPORTS
@@ -85,43 +83,49 @@ export async function validateToken(req, res) {
        FROM employee_doc_upload_tokens t
        JOIN employees e ON e.id = t.employee_id
        WHERE t.token = $1`,
-      [token]
+      [token],
     );
 
     if (!rows[0])
-      return res.status(404).json({ success: false, message: 'Upload link is invalid or has expired.' });
+      return res.status(404).json({
+        success: false,
+        message: "Upload link is invalid or has expired.",
+      });
 
     const t = rows[0];
 
     if (t.is_used)
       return res.status(410).json({
-        success: false, used: true,
-        message: 'Documents already submitted via this link.',
+        success: false,
+        used: true,
+        message: "Documents already submitted via this link.",
         employeeName: `${t.first_name} ${t.last_name}`,
         empId: t.emp_id,
       });
 
     if (new Date(t.expires_at) < new Date())
       return res.status(410).json({
-        success: false, expired: true,
-        message: 'This upload link has expired. Please contact HR for a new link.',
+        success: false,
+        expired: true,
+        message:
+          "This upload link has expired. Please contact HR for a new link.",
       });
 
     return res.json({
       success: true,
       employee: {
-        firstName:  t.first_name,
-        lastName:   t.last_name,
-        email:      t.email,
-        empId:      t.emp_id,
+        firstName: t.first_name,
+        lastName: t.last_name,
+        email: t.email,
+        empId: t.emp_id,
         department: t.department,
-        position:   t.position,
+        position: t.position,
       },
-      expiresAt:     t.expires_at,
+      expiresAt: t.expires_at,
       docsSubmitted: t.docs_submitted,
     });
   } catch (err) {
-    console.error('[validateToken]', err.message);
+    console.error("[validateToken]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -140,78 +144,98 @@ export async function employeeUpload(req, res) {
        FROM employee_doc_upload_tokens t
        JOIN employees e ON e.id = t.employee_id
        WHERE t.token = $1`,
-      [token]
+      [token],
     );
 
     if (!tokenRows[0]) {
       cleanupFiles(f);
-      return res.status(404).json({ success: false, message: 'Invalid upload link' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Invalid upload link" });
     }
 
     const t = tokenRows[0];
 
     if (t.is_used) {
       cleanupFiles(f);
-      return res.status(410).json({ success: false, used: true, message: 'Documents already submitted via this link.' });
+      return res.status(410).json({
+        success: false,
+        used: true,
+        message: "Documents already submitted via this link.",
+      });
     }
 
     if (new Date(t.expires_at) < new Date()) {
       cleanupFiles(f);
-      return res.status(410).json({ success: false, expired: true, message: 'Upload link expired.' });
+      return res.status(410).json({
+        success: false,
+        expired: true,
+        message: "Upload link expired.",
+      });
     }
 
     if (!f.signed_kye?.[0]) {
       cleanupFiles(f);
-      return res.status(400).json({ success: false, message: 'The Signed KYE Form is required.' });
+      return res
+        .status(400)
+        .json({ success: false, message: "The Signed KYE Form is required." });
     }
 
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const savedIds = [];
-    savedIds.push(await saveDoc(client, t.employee_id, t.id, 'signed_kye', f.signed_kye[0]));
+    savedIds.push(
+      await saveDoc(client, t.employee_id, t.id, "signed_kye", f.signed_kye[0]),
+    );
     if (f.other) {
       for (const file of f.other)
-        savedIds.push(await saveDoc(client, t.employee_id, t.id, 'other', file));
+        savedIds.push(
+          await saveDoc(client, t.employee_id, t.id, "other", file),
+        );
     }
 
     await client.query(
       `UPDATE employee_doc_upload_tokens
        SET is_used=true, used_at=CURRENT_TIMESTAMP
        WHERE id=$1`,
-      [t.id]
+      [t.id],
     );
     await client.query(
       `UPDATE employees
        SET docs_submitted=true, docs_submitted_at=CURRENT_TIMESTAMP,
            active_doc_upload_token=NULL, updated_at=CURRENT_TIMESTAMP
        WHERE id=$1`,
-      [t.employee_id]
+      [t.employee_id],
     );
 
-    await client.query('COMMIT');
-    console.log(`✅ [DOC UPLOAD] Employee ${t.emp_id} submitted ${savedIds.length} doc(s) (token ${t.id})`);
+    await client.query("COMMIT");
+    console.log(
+      `✅ [DOC UPLOAD] Employee ${t.emp_id} submitted ${savedIds.length} doc(s) (token ${t.id})`,
+    );
 
     setImmediate(async () => {
       try {
         await sendHRDocSubmissionNotification({
-          firstName:    t.first_name,
-          lastName:     t.last_name,
-          empId:        t.emp_id,
-          email:        t.email,
+          firstName: t.first_name,
+          lastName: t.last_name,
+          empId: t.emp_id,
+          email: t.email,
           docsUploaded: Object.keys(f).length,
         });
-      } catch (e) { console.error('HR doc notification email failed:', e.message); }
+      } catch (e) {
+        console.error("HR doc notification email failed:", e.message);
+      }
     });
 
     return res.status(201).json({
       success: true,
-      message: 'Document submitted successfully. HR has been notified.',
+      message: "Document submitted successfully. HR has been notified.",
       data: { docsUploaded: savedIds.length },
     });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query("ROLLBACK").catch(() => {});
     cleanupFiles(req.files);
-    console.error('[employeeUpload]', err.message);
+    console.error("[employeeUpload]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -235,11 +259,11 @@ export async function getSubmissions(req, res) {
            ORDER BY used_at DESC LIMIT 1
          )
        ORDER BY d.uploaded_at DESC`,
-      [req.params.empDbId]
+      [req.params.empDbId],
     );
     return res.json({ success: true, data: rows });
   } catch (err) {
-    console.error('[getSubmissions]', err.message);
+    console.error("[getSubmissions]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -276,11 +300,11 @@ export async function getPending(req, res) {
        HAVING COUNT(d.id) FILTER (
          WHERE d.reviewed = false AND (d.status IS NULL OR d.status = 'pending')
        ) > 0
-       ORDER BY e.docs_submitted_at DESC`
+       ORDER BY e.docs_submitted_at DESC`,
     );
     return res.json({ success: true, count: rows.length, data: rows });
   } catch (err) {
-    console.error('[getPending]', err.message);
+    console.error("[getPending]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -359,11 +383,11 @@ export async function getReviewed(req, res) {
          AND dc.pending_docs  = 0
          AND dc.rejected_docs = 0
          AND dc.accepted_docs = dc.total_docs
-       ORDER BY dc.used_at DESC`
+       ORDER BY dc.used_at DESC`,
     );
     return res.json({ success: true, count: rows.length, data: rows });
   } catch (err) {
-    console.error('[getReviewed]', err.message);
+    console.error("[getReviewed]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -374,7 +398,7 @@ export async function getReviewed(req, res) {
 export async function markReviewed(req, res) {
   const client = await pool.connect();
   try {
-    const reviewerName = req.admin?.name || req.body?.reviewerName || 'HR';
+    const reviewerName = req.admin?.name || req.body?.reviewerName || "HR";
 
     const { rows } = await client.query(
       `UPDATE employee_submitted_docs
@@ -382,10 +406,12 @@ export async function markReviewed(req, res) {
            reviewed_by=$1, reviewed_at=CURRENT_TIMESTAMP
        WHERE id=$2
        RETURNING *`,
-      [reviewerName, req.params.docId]
+      [reviewerName, req.params.docId],
     );
     if (!rows[0])
-      return res.status(404).json({ success: false, message: 'Document not found' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Document not found" });
 
     const empId = rows[0].employee_id;
 
@@ -403,30 +429,35 @@ export async function markReviewed(req, res) {
          )
          AND d.reviewed = false
          AND (d.status IS NULL OR d.status = 'pending')`,
-      [empId]
+      [empId],
     );
 
     if (parseInt(remaining[0].pending, 10) === 0) {
       const { rows: empRows } = await client.query(
-        `SELECT first_name, last_name, email, employee_id FROM employees WHERE id=$1`, [empId]
+        `SELECT first_name, last_name, email, employee_id FROM employees WHERE id=$1`,
+        [empId],
       );
       if (empRows[0]) {
         const emp = empRows[0];
         setImmediate(async () => {
           try {
             await sendDocAcceptanceEmail({
-              to: emp.email, firstName: emp.first_name,
-              lastName: emp.last_name, employeeId: emp.employee_id,
+              to: emp.email,
+              firstName: emp.first_name,
+              lastName: emp.last_name,
+              employeeId: emp.employee_id,
             });
             console.log(`✅ Doc acceptance email sent to ${emp.email}`);
-          } catch (e) { console.error('Doc acceptance email failed:', e.message); }
+          } catch (e) {
+            console.error("Doc acceptance email failed:", e.message);
+          }
         });
       }
     }
 
     return res.json({ success: true, data: rows[0] });
   } catch (err) {
-    console.error('[markReviewed]', err.message);
+    console.error("[markReviewed]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -438,7 +469,7 @@ export async function rejectDoc(req, res) {
   const client = await pool.connect();
   try {
     const { rejection_reason } = req.body || {};
-    const reviewerName = req.admin?.name || req.body?.reviewerName || 'HR';
+    const reviewerName = req.admin?.name || req.body?.reviewerName || "HR";
 
     const { rows } = await client.query(
       `UPDATE employee_submitted_docs
@@ -446,40 +477,51 @@ export async function rejectDoc(req, res) {
            reviewed=true, reviewed_by=$2, reviewed_at=CURRENT_TIMESTAMP
        WHERE id=$3
        RETURNING *`,
-      [rejection_reason || null, reviewerName, req.params.docId]
+      [rejection_reason || null, reviewerName, req.params.docId],
     );
     if (!rows[0])
-      return res.status(404).json({ success: false, message: 'Document not found' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Document not found" });
 
     const empDbId = rows[0].employee_id;
     const { rows: empRows } = await client.query(
-      `SELECT first_name, last_name, email, employee_id FROM employees WHERE id=$1`, [empDbId]
+      `SELECT first_name, last_name, email, employee_id FROM employees WHERE id=$1`,
+      [empDbId],
     );
 
     if (empRows[0]) {
       const emp = empRows[0];
-      const { token: freshToken } = await generateFreshUploadToken(client, empDbId, emp.employee_id);
+      const { token: freshToken } = await generateFreshUploadToken(
+        client,
+        empDbId,
+        emp.employee_id,
+      );
       const uploadUrl = `${frontendUrl()}/upload-documents/${freshToken}`;
-      console.log(`🔗 Fresh upload token generated for ${emp.employee_id}: ${freshToken}`);
+      console.log(
+        `🔗 Fresh upload token generated for ${emp.employee_id}: ${freshToken}`,
+      );
 
       setImmediate(async () => {
         try {
           await sendDocRejectionEmail({
-            to:         emp.email,
-            firstName:  emp.first_name,
-            lastName:   emp.last_name,
+            to: emp.email,
+            firstName: emp.first_name,
+            lastName: emp.last_name,
             employeeId: emp.employee_id,
-            reason:     rejection_reason || '',
+            reason: rejection_reason || "",
             uploadUrl,
           });
           console.log(`✅ Doc rejection email sent to ${emp.email}`);
-        } catch (e) { console.error('Doc rejection email failed:', e.message); }
+        } catch (e) {
+          console.error("Doc rejection email failed:", e.message);
+        }
       });
     }
 
     return res.json({ success: true, data: rows[0] });
   } catch (err) {
-    console.error('[rejectDoc]', err.message);
+    console.error("[rejectDoc]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -492,24 +534,31 @@ export async function generateUploadLink(req, res) {
   try {
     const { empDbId } = req.params;
     const { rows: empRows } = await client.query(
-      `SELECT * FROM employees WHERE id=$1`, [empDbId]
+      `SELECT * FROM employees WHERE id=$1`,
+      [empDbId],
     );
     if (!empRows[0])
-      return res.status(404).json({ success: false, message: 'Employee not found' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Employee not found" });
 
     const emp = empRows[0];
-    const { token, expiresAt } = await generateFreshUploadToken(client, empDbId, emp.employee_id);
+    const { token, expiresAt } = await generateFreshUploadToken(
+      client,
+      empDbId,
+      emp.employee_id,
+    );
     const uploadUrl = `${frontendUrl()}/upload-documents/${token}`;
 
     return res.json({
-      success:   true,
+      success: true,
       token,
       uploadUrl,
       expiresAt: expiresAt.toISOString(),
-      message:   'Upload link generated.',
+      message: "Upload link generated.",
     });
   } catch (err) {
-    console.error('[generateUploadLink]', err.message);
+    console.error("[generateUploadLink]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -524,20 +573,27 @@ export async function hrUpload(req, res) {
     const f = req.files || {};
 
     const { rows: empRows } = await client.query(
-      `SELECT id, employee_id, first_name, last_name FROM employees WHERE id=$1`, [empDbId]
+      `SELECT id, employee_id, first_name, last_name FROM employees WHERE id=$1`,
+      [empDbId],
     );
     if (!empRows[0]) {
       cleanupFiles(f);
-      return res.status(404).json({ success: false, message: 'Employee not found.' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Employee not found." });
     }
     if (!f.bgv_form?.[0] && !f.email_screenshot?.[0])
-      return res.status(400).json({ success: false, message: 'Please upload at least one document.' });
+      return res.status(400).json({
+        success: false,
+        message: "Please upload at least one document.",
+      });
 
-    const uploadedBy = req.admin?.name || req.body?.uploadedBy || 'HR';
+    const uploadedBy = req.admin?.name || req.body?.uploadedBy || "HR";
 
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     const insertHRDoc = async (docType, file) => {
+      const { key } = await uploadFileToS3(file, S3_FOLDER_HR);
       const { rows } = await client.query(
         `INSERT INTO employee_hr_uploaded_docs
            (employee_id, document_type, file_path, file_name,
@@ -546,30 +602,38 @@ export async function hrUpload(req, res) {
          RETURNING id, employee_id, document_type, file_path, file_name,
                    file_size, mime_type, uploaded_by, uploaded_at`,
         [
-          empDbId, docType,
-          `/uploads/employee_submitted_docs/${file.filename}`,
-          file.originalname, file.size, file.mimetype, uploadedBy,
-        ]
+          empDbId,
+          docType,
+          key,
+          file.originalname,
+          file.size,
+          file.mimetype,
+          uploadedBy,
+        ],
       );
       return rows[0];
     };
 
     const saved = [];
-    if (f.bgv_form?.[0])         saved.push(await insertHRDoc('bgv_form',         f.bgv_form[0]));
-    if (f.email_screenshot?.[0]) saved.push(await insertHRDoc('email_screenshot',  f.email_screenshot[0]));
+    if (f.bgv_form?.[0])
+      saved.push(await insertHRDoc("bgv_form", f.bgv_form[0]));
+    if (f.email_screenshot?.[0])
+      saved.push(await insertHRDoc("email_screenshot", f.email_screenshot[0]));
 
-    await client.query('COMMIT');
-    console.log(`✅ [HR UPLOAD] ${saved.length} doc(s) uploaded for employee ${empRows[0].employee_id}`);
+    await client.query("COMMIT");
+    console.log(
+      `✅ [HR UPLOAD] ${saved.length} doc(s) uploaded for employee ${empRows[0].employee_id}`,
+    );
 
     return res.status(201).json({
       success: true,
       message: `${saved.length} document(s) uploaded successfully.`,
-      data:    saved,
+      data: saved,
     });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query("ROLLBACK").catch(() => {});
     cleanupFiles(req.files);
-    console.error('[hrUpload]', err.message);
+    console.error("[hrUpload]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -584,11 +648,11 @@ export async function getHRUploads(req, res) {
       `SELECT * FROM employee_hr_uploaded_docs
        WHERE employee_id=$1
        ORDER BY uploaded_at DESC`,
-      [req.params.empDbId]
+      [req.params.empDbId],
     );
     return res.json({ success: true, data: rows });
   } catch (err) {
-    console.error('[getHRUploads]', err.message);
+    console.error("[getHRUploads]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -601,16 +665,21 @@ export async function deleteHRUpload(req, res) {
   try {
     const { rows } = await client.query(
       `DELETE FROM employee_hr_uploaded_docs WHERE id=$1 RETURNING *`,
-      [req.params.docId]
+      [req.params.docId],
     );
     if (!rows[0])
-      return res.status(404).json({ success: false, message: 'Document not found.' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Document not found." });
 
-    try { fs.unlinkSync(path.join(PROJECT_ROOT, rows[0].file_path)); } catch (_) {}
+    // Delete from S3 (fire-and-forget; non-fatal if the key is missing)
+    deleteFileFromS3(rows[0].file_path).catch((e) =>
+      console.warn("[deleteHRUpload] S3 delete failed:", e.message),
+    );
 
-    return res.json({ success: true, message: 'Document deleted.' });
+    return res.json({ success: true, message: "Document deleted." });
   } catch (err) {
-    console.error('[deleteHRUpload]', err.message);
+    console.error("[deleteHRUpload]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -625,32 +694,39 @@ export async function hrKyeInsert(req, res) {
     const f = req.files || {};
 
     if (!f.signed_kye?.[0])
-      return res.status(400).json({ success: false, message: 'signed_kye file is required.' });
+      return res
+        .status(400)
+        .json({ success: false, message: "signed_kye file is required." });
 
     const { rows: empRows } = await client.query(
-      `SELECT id, employee_id, first_name, last_name FROM employees WHERE id=$1`, [empDbId]
+      `SELECT id, employee_id, first_name, last_name FROM employees WHERE id=$1`,
+      [empDbId],
     );
     if (!empRows[0]) {
       cleanupFiles(f);
-      return res.status(404).json({ success: false, message: 'Employee not found.' });
+      return res
+        .status(404)
+        .json({ success: false, message: "Employee not found." });
     }
     const emp = empRows[0];
 
-    await client.query('BEGIN');
+    await client.query("BEGIN");
 
     // Synthetic token — already marked used, expires 1 year out
-    const token     = crypto.randomBytes(32).toString('hex');
+    const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
     const { rows: tokenRows } = await client.query(
       `INSERT INTO employee_doc_upload_tokens
          (token, employee_id, employee_emp_id, expires_at, is_used, used_at)
        VALUES ($1,$2,$3,$4,true,CURRENT_TIMESTAMP)
        RETURNING id`,
-      [token, empDbId, emp.employee_id, expiresAt]
+      [token, empDbId, emp.employee_id, expiresAt],
     );
-    const tokenId    = tokenRows[0].id;
-    const uploadedBy = req.admin?.name || req.body?.uploadedBy || 'HR';
-    const file       = f.signed_kye[0];
+    const tokenId = tokenRows[0].id;
+    const uploadedBy = req.admin?.name || req.body?.uploadedBy || "HR";
+    const file = f.signed_kye[0];
+
+    const { key: kyeS3Key } = await uploadFileToS3(file, S3_FOLDER_SUBMITTED);
 
     const { rows: docRows } = await client.query(
       `INSERT INTO employee_submitted_docs
@@ -660,10 +736,14 @@ export async function hrKyeInsert(req, res) {
        VALUES ($1,$2,'signed_kye',$3,$4,$5,$6,'accepted',true,$7,CURRENT_TIMESTAMP)
        RETURNING *`,
       [
-        empDbId, tokenId,
-        `/uploads/employee_submitted_docs/${file.filename}`,
-        file.originalname, file.size, file.mimetype, uploadedBy,
-      ]
+        empDbId,
+        tokenId,
+        kyeS3Key,
+        file.originalname,
+        file.size,
+        file.mimetype,
+        uploadedBy,
+      ],
     );
 
     // Ensure docs_submitted is set without overwriting an earlier timestamp
@@ -673,21 +753,23 @@ export async function hrKyeInsert(req, res) {
            docs_submitted_at=COALESCE(docs_submitted_at, CURRENT_TIMESTAMP),
            active_doc_upload_token=NULL, updated_at=CURRENT_TIMESTAMP
        WHERE id=$1`,
-      [empDbId]
+      [empDbId],
     );
 
-    await client.query('COMMIT');
-    console.log(`✅ [HR KYE INSERT] HR uploaded KYE doc for employee ${emp.employee_id}`);
+    await client.query("COMMIT");
+    console.log(
+      `✅ [HR KYE INSERT] HR uploaded KYE doc for employee ${emp.employee_id}`,
+    );
 
     return res.status(201).json({
       success: true,
-      message: 'KYE document uploaded and accepted.',
-      data:    docRows[0],
+      message: "KYE document uploaded and accepted.",
+      data: docRows[0],
     });
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
+    await client.query("ROLLBACK").catch(() => {});
     cleanupFiles(req.files);
-    console.error('[hrKyeInsert]', err.message);
+    console.error("[hrKyeInsert]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -704,20 +786,25 @@ export async function hrKyeReplace(req, res) {
     const { rows: existing } = await client.query(
       `SELECT * FROM employee_submitted_docs
        WHERE id=$1 AND document_type='signed_kye'`,
-      [docId]
+      [docId],
     );
     if (!existing[0]) {
       cleanupFiles(f);
-      return res.status(404).json({ success: false, message: 'KYE document not found.' });
+      return res
+        .status(404)
+        .json({ success: false, message: "KYE document not found." });
     }
 
-    const uploadedBy = req.admin?.name || req.body?.uploadedBy || 'HR';
+    const uploadedBy = req.admin?.name || req.body?.uploadedBy || "HR";
 
     if (f.signed_kye?.[0]) {
-      // Delete old physical file before writing the new one
-      try { fs.unlinkSync(path.join(PROJECT_ROOT, existing[0].file_path)); } catch (_) {}
+      // Delete old S3 object before uploading the replacement
+      deleteFileFromS3(existing[0].file_path).catch((e) =>
+        console.warn("[hrKyeReplace] S3 delete of old file failed:", e.message),
+      );
 
       const file = f.signed_kye[0];
+      const { key: newS3Key } = await uploadFileToS3(file, S3_FOLDER_SUBMITTED);
       const { rows } = await client.query(
         `UPDATE employee_submitted_docs
          SET file_path=$1, file_name=$2, file_size=$3, mime_type=$4,
@@ -727,12 +814,20 @@ export async function hrKyeReplace(req, res) {
          WHERE id=$6
          RETURNING *`,
         [
-          `/uploads/employee_submitted_docs/${file.filename}`,
-          file.originalname, file.size, file.mimetype, uploadedBy, docId,
-        ]
+          newS3Key,
+          file.originalname,
+          file.size,
+          file.mimetype,
+          uploadedBy,
+          docId,
+        ],
       );
       console.log(`✅ [HR KYE REPLACE] doc ${docId} replaced by ${uploadedBy}`);
-      return res.json({ success: true, message: 'KYE document replaced.', data: rows[0] });
+      return res.json({
+        success: true,
+        message: "KYE document replaced.",
+        data: rows[0],
+      });
     }
 
     // No new file supplied — just re-accept the existing row
@@ -742,12 +837,16 @@ export async function hrKyeReplace(req, res) {
            reviewed_by=$1, reviewed_at=CURRENT_TIMESTAMP
        WHERE id=$2
        RETURNING *`,
-      [uploadedBy, docId]
+      [uploadedBy, docId],
     );
-    return res.json({ success: true, message: 'KYE document status updated.', data: rows[0] });
+    return res.json({
+      success: true,
+      message: "KYE document status updated.",
+      data: rows[0],
+    });
   } catch (err) {
     cleanupFiles(req.files);
-    console.error('[hrKyeReplace]', err.message);
+    console.error("[hrKyeReplace]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
@@ -762,17 +861,22 @@ export async function hrKyeDelete(req, res) {
       `DELETE FROM employee_submitted_docs
        WHERE id=$1 AND document_type='signed_kye'
        RETURNING *`,
-      [req.params.docId]
+      [req.params.docId],
     );
     if (!rows[0])
-      return res.status(404).json({ success: false, message: 'KYE document not found.' });
+      return res
+        .status(404)
+        .json({ success: false, message: "KYE document not found." });
 
-    try { fs.unlinkSync(path.join(PROJECT_ROOT, rows[0].file_path)); } catch (_) {}
+    // Delete from S3 (fire-and-forget)
+    deleteFileFromS3(rows[0].file_path).catch((e) =>
+      console.warn("[hrKyeDelete] S3 delete failed:", e.message),
+    );
 
     console.log(`🗑️  [HR KYE DELETE] doc ${req.params.docId} deleted`);
-    return res.json({ success: true, message: 'KYE document deleted.' });
+    return res.json({ success: true, message: "KYE document deleted." });
   } catch (err) {
-    console.error('[hrKyeDelete]', err.message);
+    console.error("[hrKyeDelete]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
